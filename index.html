@@ -37,6 +37,10 @@
 
       <section class="stage">
         <div class="toolbar">
+          <div class="group">
+            <button id="btnUndo" title="Undo (Ctrl+Z)">↶ Undo</button>
+            <button id="btnRedo" title="Redo (Ctrl+Y)">↷ Redo</button>
+          </div>
           <div class="seg" role="radiogroup" aria-label="Tool">
             <button data-tool="select" title="Click edges to add or remove holes; click corner dots to switch corner holes">Edges &amp; corners</button>
             <button data-tool="draw" title="Click to place points. Click the first point, or press Enter, to finish.">Draw</button>
@@ -73,6 +77,7 @@
     <script src="js/geometry.js"></script>
     <script src="js/layout.js"></script>
     <script src="js/model.js"></script>
+    <script src="js/boolean.js"></script>
     <script src="js/render.js"></script>
     <script src="js/pdf.js"></script>
     <script src="js/storage.js"></script>

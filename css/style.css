@@ -468,3 +468,26 @@ dialog menu {
     max-height: none;
   }
 }
+
+button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.align-grid {
+  display: grid;
+  grid-template-columns: 96px repeat(4, auto);
+  gap: 6px 4px;
+  align-items: center;
+  margin: 8px 0;
+  font-size: 12px;
+}
+.align-grid span {
+  color: var(--muted);
+}
+.align-grid span:nth-of-type(1) ~ button:nth-of-type(3),
+.align-grid span:nth-of-type(2) ~ button:nth-of-type(6) {
+  grid-column: span 2;
+}
+#canvas .grab {
+  cursor: move;
+}

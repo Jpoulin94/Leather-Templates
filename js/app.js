@@ -24,6 +24,8 @@
     dirty: false,
     savedName: null,
     paper: 'letter',
+    combine: null, // { idx, pieces } while choosing lines
+    alignTarget: 'outline',
   };
 
   // ---------------------------------------------------------------------
@@ -40,11 +42,56 @@
   const fmt = (mm) => M.format(mm, units());
   const edgeProps = (c, src) => (src < c.segments.length ? c.segments[src] : c.closing);
   const minorStep = () => (units() === 'in' ? 25.4 / 16 : 1);
+  const contourBox = (c) => G.bbox(G.buildPrimitives(c));
+
+  function moveContour(c, dx, dy) {
+    if (c.start) c.start = { x: round(c.start.x + dx), y: round(c.start.y + dy) };
+  }
+
+  // Undo history: snapshots of the project, taken whenever it changes.
+  const history = { undo: [], redo: [], last: JSON.stringify(project), limit: 200 };
+
+  function resetHistory() {
+    history.undo = [];
+    history.redo = [];
+    history.last = JSON.stringify(project);
+  }
 
   function commit() {
+    const now = JSON.stringify(project);
+    if (now !== history.last) {
+      history.undo.push(history.last);
+      if (history.undo.length > history.limit) history.undo.shift();
+      history.redo = [];
+      history.last = now;
+      ui.dirty = true;
+      S.saveCurrent(project);
+    }
+    renderAll();
+  }
+
+  function restore(snapshot) {
+    project = JSON.parse(snapshot);
+    history.last = snapshot;
+    ui.pieceIdx = Math.min(ui.pieceIdx, project.pieces.length - 1);
+    if (ui.contour.kind === 'cutout' && !piece().cutouts[ui.contour.idx]) ui.contour = { kind: 'outline', idx: 0 };
+    if (ui.tool === 'draw') ui.tool = 'select';
+    ui.combine = null;
     ui.dirty = true;
     S.saveCurrent(project);
     renderAll();
+  }
+
+  function undo() {
+    if (!history.undo.length) return;
+    history.redo.push(history.last);
+    restore(history.undo.pop());
+  }
+
+  function redo() {
+    if (!history.redo.length) return;
+    history.undo.push(history.last);
+    restore(history.redo.pop());
   }
 
   function toast(msg) {
@@ -332,8 +379,14 @@
     ];
     const active = contour();
 
+    const combining = ui.combine;
     contours.forEach(({ c, lay: cl, kind, idx }) => {
+      if (combining && (kind === 'outline' || idx === combining.idx)) return;
       const isActive = c === active;
+      // Cutouts can be grabbed anywhere inside to select or move them.
+      if (kind === 'cutout' && !combining && ui.tool === 'select') {
+        out.push(`<path class="grab" d="${R.pathData(cl.prims, flip, true)}" fill="${isActive ? 'color-mix(in srgb, var(--accent) 10%, transparent)' : 'transparent'}" stroke="none" data-kind="cutout" data-ci="${idx}" data-shape="1"/>`);
+      }
       cl.prims.forEach((p) => {
         const d = R.pathData([p], flip, false);
         const col = `var(--edge-${p.mode})`;
@@ -352,8 +405,19 @@
       });
     });
 
+    // Choosing lines: pieces split where the shapes cross
+    if (combining) {
+      combining.pieces.forEach((pcs, i) => {
+        const d = R.pathData([pcs.prim], flip, false);
+        out.push(pcs.keep
+          ? `<path d="${d}" fill="none" stroke="var(--accent)" stroke-width="3" vector-effect="non-scaling-stroke"/>`
+          : `<path d="${d}" fill="none" stroke="var(--muted)" stroke-width="1.25" stroke-dasharray="4 4" opacity="0.7" vector-effect="non-scaling-stroke"/>`);
+        out.push(`<path class="hit" d="${d}" fill="none" stroke="transparent" stroke-width="16" vector-effect="non-scaling-stroke" data-piece="${i}"><title>Click to ${pcs.keep ? 'remove' : 'keep'} this line</title></path>`);
+      });
+    }
+
     // Labels and corner markers for the active contour
-    if (ui.tool !== 'draw') {
+    if (ui.tool !== 'draw' && !combining) {
       const edges = G.buildEdges(active);
       const ccw = G.signedArea(edges) > 0;
       edges.forEach((e) => {
@@ -414,10 +478,12 @@
       msg = !c.start
         ? 'Click to place the first point.'
         : 'Click to add points. Hold Shift for 15° steps. Click the first point or press Enter to finish. Backspace removes the last line.';
+    } else if (ui.combine) {
+      msg = 'Click lines to keep (solid) or remove (dashed), then press Apply on the right. Esc cancels.';
     } else if (ui.tool === 'zero') {
       msg = 'Click an edge of the outline to place the zero point. Holes are laid out from it so matching pieces line up.';
     } else {
-      msg = `Click an edge to give it ${MODE_LABEL[ui.clickMode].toLowerCase()} (click again to clear). Click a corner dot to switch its corner hole. Drag to pan, scroll to zoom.`;
+      msg = `Click an edge to give it ${MODE_LABEL[ui.clickMode].toLowerCase()} (click again to clear). Click a corner dot to switch its corner hole. Drag inside a cutout to move it. Drag elsewhere to pan, scroll to zoom.`;
     }
     $('#hint').textContent = msg;
   }
@@ -427,8 +493,22 @@
       addDrawPoint(world);
       return;
     }
-    const el = target && target.closest ? target.closest('[data-edge],[data-vertex]') : null;
+    if (ui.combine) {
+      const pe = target && target.closest ? target.closest('[data-piece]') : null;
+      if (pe) {
+        const pcs = ui.combine.pieces[Number(pe.dataset.piece)];
+        pcs.keep = !pcs.keep;
+        renderCanvas();
+      }
+      return;
+    }
+    const el = target && target.closest ? target.closest('[data-edge],[data-vertex],[data-shape]') : null;
     if (!el) return;
+    if (el.dataset.shape) {
+      ui.contour = { kind: 'cutout', idx: Number(el.dataset.ci) };
+      renderAll();
+      return;
+    }
     if (el.dataset.vertex !== undefined) {
       const c = contour();
       const p = edgeProps(c, Number(el.dataset.vertex));
@@ -459,6 +539,14 @@
 
   svg.addEventListener('pointerdown', (e) => {
     ui.ptr = { x: e.clientX, y: e.clientY, cx: ui.view.cx, cy: ui.view.cy, moved: false, target: e.target, button: e.button };
+    const grab = e.button === 0 && ui.tool === 'select' && !ui.combine && e.target.closest
+      ? e.target.closest('[data-kind="cutout"]')
+      : null;
+    if (grab) {
+      const idx = Number(grab.dataset.ci);
+      const c = piece().cutouts[idx];
+      if (c && c.start) ui.ptr.drag = { idx, start: { ...c.start } };
+    }
     svg.setPointerCapture(e.pointerId);
   });
   svg.addEventListener('pointermove', (e) => {
@@ -468,7 +556,18 @@
       const dx = e.clientX - ui.ptr.x;
       const dy = e.clientY - ui.ptr.y;
       if (Math.hypot(dx, dy) > 4) ui.ptr.moved = true;
-      if (ui.ptr.moved) {
+      if (ui.ptr.moved && ui.ptr.drag) {
+        const c = piece().cutouts[ui.ptr.drag.idx];
+        let mx = dx / ui.view.scale;
+        let my = -dy / ui.view.scale;
+        if (ui.snap) {
+          const st = minorStep();
+          mx = Math.round(mx / st) * st;
+          my = Math.round(my / st) * st;
+        }
+        c.start = { x: round(ui.ptr.drag.start.x + mx), y: round(ui.ptr.drag.start.y + my) };
+        ui.contour = { kind: 'cutout', idx: ui.ptr.drag.idx };
+      } else if (ui.ptr.moved) {
         ui.view.cx = ui.ptr.cx - dx / ui.view.scale;
         ui.view.cy = ui.ptr.cy + dy / ui.view.scale;
       }
@@ -478,6 +577,10 @@
   svg.addEventListener('pointerup', (e) => {
     const p = ui.ptr;
     ui.ptr = null;
+    if (p && p.drag && p.moved) {
+      commit();
+      return;
+    }
     if (p && !p.moved && p.button === 0) handleCanvasClick(p.target, toWorld(e));
   });
   svg.addEventListener('pointerleave', () => {
@@ -508,6 +611,19 @@
       saveProject();
       return;
     }
+    if ((e.ctrlKey || e.metaKey) && !typing && !$('#dialog').open) {
+      const k = e.key.toLowerCase();
+      if (k === 'z' && !e.shiftKey) {
+        e.preventDefault();
+        undo();
+        return;
+      }
+      if (k === 'y' || (k === 'z' && e.shiftKey)) {
+        e.preventDefault();
+        redo();
+        return;
+      }
+    }
     if (typing || $('#dialog').open) return;
     if (e.key === 'Shift') {
       ui.shift = true;
@@ -522,6 +638,9 @@
         else c.start = null;
         commit();
       }
+    } else if (e.key === 'Escape' && ui.combine) {
+      ui.combine = null;
+      renderAll();
     } else if (e.key === 'Escape' && ui.tool !== 'select') {
       ui.tool = 'select';
       renderAll();
@@ -682,7 +801,76 @@
   // ---------------------------------------------------------------------
   // Right panel: shape editor
 
+  function renderCombinePanel() {
+    const kept = ui.combine.pieces.filter((x) => x.keep).length;
+    $('#rightPanel').innerHTML = `
+      <section>
+        <h2>Choose lines</h2>
+        <p>The outline and cutout ${ui.combine.idx + 1} are split wherever they cross. Click a line on the drawing to keep it (solid) or remove it (dashed). The kept lines must join up into one closed shape.</p>
+        <div class="row"><span class="muted">Start from:</span>
+          <button class="small" data-preset="cut">Cut away</button>
+          <button class="small" data-preset="merge">Merge</button>
+          <button class="small" data-preset="overlap">Overlap</button></div>
+        <p class="ok">${kept} of ${ui.combine.pieces.length} lines kept.</p>
+        <div class="row">
+          <button class="primary" id="applyLines">Apply</button>
+          <button id="cancelLines">Cancel</button>
+        </div>
+      </section>`;
+  }
+
+  function renderShapeTools(pc) {
+    const c = contour();
+    const b = contourBox(c);
+    if (!b) return '';
+    const targets = [`<option value="outline">Outline</option>`]
+      .concat(pc.cutouts.map((_, i) => (i === ui.contour.idx ? '' : `<option value="cutout:${i}">Cutout ${i + 1}</option>`)))
+      .join('');
+    const lenInput = (id, mm) =>
+      `<span class="unit" data-unit="${units()}"><input type="text" inputmode="decimal" id="${id}" value="${fmt(mm)}" style="width:86px"></span>`;
+    return `
+      <section>
+        <h2>Position &amp; align</h2>
+        <div class="row">
+          <label>Centre X ${lenInput('posX', (b.minX + b.maxX) / 2)}</label>
+          <label>Y ${lenInput('posY', (b.minY + b.maxY) / 2)}</label>
+        </div>
+        <div class="field" style="grid-template-columns: 1fr 140px"><label for="alignTarget">Line it up with</label>
+          <select id="alignTarget">${targets}</select></div>
+        <div class="align-grid">
+          <span>Side to side</span>
+          <button class="small" data-align="left">Left edges</button>
+          <button class="small" data-align="hcenter">Centres</button>
+          <button class="small" data-align="right">Right edges</button>
+          <span>Up and down</span>
+          <button class="small" data-align="bottom">Bottoms</button>
+          <button class="small" data-align="vmiddle">Middles</button>
+          <button class="small" data-align="top">Tops</button>
+          <span>Centre on its edge</span>
+          <button class="small" data-align="onTop">Top</button>
+          <button class="small" data-align="onBottom">Bottom</button>
+          <button class="small" data-align="onLeft">Left</button>
+          <button class="small" data-align="onRight">Right</button>
+        </div>
+        <p class="note">You can also drag the shape on the drawing.</p>
+      </section>
+      <section>
+        <h2>Combine with the outline</h2>
+        <div class="row">
+          <button class="small" data-combine="cut" title="Remove this shape's area from the outline">Cut away</button>
+          <button class="small" data-combine="merge" title="Add this shape's area to the outline">Merge</button>
+          <button class="small" data-combine="overlap" title="Keep only where the two overlap">Keep overlap</button>
+          <button class="small" id="chooseLines" title="Pick which lines to keep">Choose lines…</button>
+        </div>
+        <p class="note">Until you combine it, this shape is a cutout (a hole inside the piece). Thumb notch on a card pocket: add a circle, line it up with <b>Centres</b> and <b>Centre on its edge: Top</b>, then <b>Cut away</b>.</p>
+      </section>`;
+  }
+
   function renderRight() {
+    if (ui.combine) {
+      renderCombinePanel();
+      return;
+    }
     const pc = piece();
     const c = contour();
     const n = c.segments.length;
@@ -752,11 +940,12 @@
           ${ui.contour.kind === 'cutout' ? '<button class="small danger" id="delCutout">Delete cutout</button>' : ''}
           <button class="small" id="redraw" title="Clear this shape and draw it again">Redraw</button>
         </div>
-        <div class="row"><span class="muted">Add cutout:</span>
+        <div class="row"><span class="muted">Add shape:</span>
           <button class="small" id="cutRect">Rectangle</button>
           <button class="small" id="cutCircle">Circle</button>
           <button class="small" id="cutDraw">Draw</button></div>
       </section>
+      ${ui.contour.kind === 'cutout' ? renderShapeTools(pc) : ''}
       <section>
         <h2>Start point</h2>
         <div class="row">
@@ -791,6 +980,93 @@
           : holeCount ? '<p class="ok">Every run uses your exact spacing.</p>' : ''}
       </section>`;
     $('#contourSel').value = `${ui.contour.kind}:${ui.contour.kind === 'outline' ? 0 : ui.contour.idx}`;
+    const at = $('#alignTarget');
+    if (at) {
+      at.value = ui.alignTarget;
+      if (at.value !== ui.alignTarget) at.value = ui.alignTarget = 'outline';
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // Aligning and combining shapes
+
+  function alignShape(how) {
+    const pc = piece();
+    const c = contour();
+    const target = ui.alignTarget.startsWith('cutout:')
+      ? pc.cutouts[Number(ui.alignTarget.split(':')[1])]
+      : pc.outline;
+    const S0 = contourBox(c);
+    const T = target && contourBox(target);
+    if (!S0 || !T) return;
+    const scx = (S0.minX + S0.maxX) / 2;
+    const scy = (S0.minY + S0.maxY) / 2;
+    const moves = {
+      left: [T.minX - S0.minX, 0],
+      hcenter: [(T.minX + T.maxX) / 2 - scx, 0],
+      right: [T.maxX - S0.maxX, 0],
+      bottom: [0, T.minY - S0.minY],
+      vmiddle: [0, (T.minY + T.maxY) / 2 - scy],
+      top: [0, T.maxY - S0.maxY],
+      onTop: [0, T.maxY - scy],
+      onBottom: [0, T.minY - scy],
+      onLeft: [T.minX - scx, 0],
+      onRight: [T.maxX - scx, 0],
+    };
+    const [dx, dy] = moves[how];
+    moveContour(c, dx, dy);
+    commit();
+  }
+
+  // Keep the zero point at the same spot when the outline's edges change.
+  function relocateZero(pc, oldOutline) {
+    if (!pc.zero.enabled) return;
+    const pt = G.pointOnEdge(oldOutline, pc.zero.edge, pc.zero.offset);
+    if (!pt) return;
+    let best = null;
+    G.buildEdges(pc.outline).forEach((e) => {
+      const s = G.projectOnPrim(e, pt);
+      const d = G.dist(G.primPointAt(e, s), pt);
+      if (!best || d < best.d) best = { d, edge: e.edge, offset: s };
+    });
+    if (best) pc.zero = { ...pc.zero, edge: best.edge, offset: round(best.offset) };
+  }
+
+  function applyCombine(idx, op, pieces) {
+    const pc = piece();
+    const shape = pc.cutouts[idx];
+    const res = LT.boolean.combine(pc.outline, shape, op, pieces);
+    if (!res.outline) {
+      toast(pieces ? 'The kept lines don’t join into a closed shape.' : 'Those shapes don’t overlap, so there is nothing to keep.');
+      return false;
+    }
+    if (op === 'merge' && res.extra) {
+      toast('The shape doesn’t touch the outline, so it can’t be merged.');
+      return false;
+    }
+    const old = pc.outline;
+    pc.outline = res.outline;
+    pc.cutouts.splice(idx, 1);
+    pc.cutouts.push(...res.holes);
+    relocateZero(pc, old);
+    ui.contour = { kind: 'outline', idx: 0 };
+    ui.combine = null;
+    commit();
+    const notes = [];
+    if (res.extra) notes.push(`The result came apart into ${res.extra + 1} parts; the largest was kept.`);
+    if (res.open) notes.push('Some kept lines didn’t connect and were left out.');
+    toast(notes.length ? notes.join(' ') : 'Combined. Use Undo if it isn’t what you wanted.');
+    return true;
+  }
+
+  function startChooseLines(idx) {
+    const pc = piece();
+    const A = G.buildPrimitives(pc.outline);
+    const B = G.buildPrimitives(pc.cutouts[idx]);
+    const pieces = LT.boolean.preset(LT.boolean.splitShapes(A, B), 'cut');
+    ui.combine = { idx, pieces };
+    ui.tool = 'select';
+    renderAll();
   }
 
   $('#rightPanel').addEventListener('change', (e) => {
@@ -835,6 +1111,18 @@
       }
       return commit();
     }
+    if (t.id === 'alignTarget') {
+      ui.alignTarget = t.value;
+      return undefined;
+    }
+    if (t.id === 'posX' || t.id === 'posY') {
+      const v = M.parseLength(t.value, units());
+      const b = contourBox(c);
+      if (!Number.isFinite(v) || !b) return bad(t);
+      if (t.id === 'posX') moveContour(c, v - (b.minX + b.maxX) / 2, 0);
+      else moveContour(c, 0, v - (b.minY + b.maxY) / 2);
+      return commit();
+    }
     if (t.id === 'startX' || t.id === 'startY') {
       const v = M.parseLength(t.value, units());
       if (!Number.isFinite(v)) return bad(t);
@@ -872,6 +1160,18 @@
     if (t.dataset.delSeg !== undefined) {
       c.segments.splice(Number(t.dataset.delSeg), 1);
       return commit();
+    }
+    if (t.dataset.align) return alignShape(t.dataset.align);
+    if (t.dataset.combine) return applyCombine(ui.contour.idx, t.dataset.combine);
+    if (t.dataset.preset && ui.combine) {
+      LT.boolean.preset(ui.combine.pieces, t.dataset.preset);
+      return renderAll();
+    }
+    if (t.id === 'chooseLines') return startChooseLines(ui.contour.idx);
+    if (t.id === 'applyLines' && ui.combine) return applyCombine(ui.combine.idx, null, ui.combine.pieces);
+    if (t.id === 'cancelLines') {
+      ui.combine = null;
+      return renderAll();
     }
     switch (t.id) {
       case 'addLine':
@@ -919,6 +1219,8 @@
     $$('[data-tool]').forEach((b) => b.classList.toggle('on', b.dataset.tool === ui.tool));
     $$('[data-mode]').forEach((b) => b.classList.toggle('on', b.dataset.mode === ui.clickMode));
     $('#snap').checked = ui.snap;
+    $('#btnUndo').disabled = !history.undo.length;
+    $('#btnRedo').disabled = !history.redo.length;
     document.title = `${project.name}${ui.dirty ? ' •' : ''} – Leather Templates`;
   }
 
@@ -965,6 +1267,8 @@
     ui.view = null;
     ui.savedName = savedName;
     ui.dirty = false;
+    ui.combine = null;
+    resetHistory();
     S.saveCurrent(project);
     renderAll();
   }
@@ -1063,6 +1367,8 @@
   $('#snap').addEventListener('change', (e) => {
     ui.snap = e.target.checked;
   });
+  $('#btnUndo').addEventListener('click', undo);
+  $('#btnRedo').addEventListener('click', redo);
   $('#btnFit').addEventListener('click', () => {
     fitView();
     renderCanvas();

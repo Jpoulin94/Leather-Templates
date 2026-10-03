@@ -254,14 +254,20 @@
     return pts;
   }
 
+  // Exact signed area (Green's theorem); positive for counter-clockwise.
   function signedArea(prims) {
-    const pts = samplePoints(prims);
     let a = 0;
-    for (let i = 0; i < pts.length; i++) {
-      const p = pts[i];
-      const q = pts[(i + 1) % pts.length];
-      a += p.x * q.y - q.x * p.y;
-    }
+    prims.forEach((p) => {
+      if (p.type === 'line') {
+        a += p.a.x * p.b.y - p.b.x * p.a.y;
+      } else {
+        const t0 = p.a0;
+        const t1 = p.a0 + p.sweep;
+        a +=
+          p.r * p.r * p.sweep +
+          p.r * (p.c.x * (Math.sin(t1) - Math.sin(t0)) - p.c.y * (Math.cos(t1) - Math.cos(t0)));
+      }
+    });
     return a / 2;
   }
 

@@ -13,7 +13,10 @@ The app is a single web page with nothing to install and no internet connection 
 - **Pieces → Add**: start from a rectangle or circle with typed sizes, or choose **Draw my own** and click points on the grid. Click the first point (or press Enter) to finish. Hold Shift to lock angles to 15° steps.
 - Every edge is listed in the **Edges** table on the right. Type an exact length and angle for each edge. An edge can also be an **arc** (radius, plus a sweep that turns left when positive and right when negative).
 - **Corners** table: give any corner between two straight edges a rounded radius.
-- **Cutouts**: add rectangles, circles or drawn shapes inside a piece, such as card slots or a thumb notch. They can have holes or not.
+- **Add shape**: add rectangles, circles or drawn shapes to a piece. A new shape starts as a cutout (a hole inside the piece, such as a card slot), with or without its own holes.
+- **Move and line up shapes**: drag a shape on the drawing, type its centre position, or line it up with the outline or another shape (left, centre or right edges; bottoms, middles or tops; or centred on one of its edges).
+- **Combine shapes**: **Cut away** removes the shape's area from the outline, **Merge** adds it, and **Keep overlap** keeps only where they overlap. **Choose lines…** splits both shapes where they cross so you can click exactly which lines to keep. For example, a thumb notch on a card pocket is a circle lined up with **Centres** and **Centre on its edge: Top**, then **Cut away**.
+- **Undo / Redo**: toolbar buttons, or Ctrl+Z and Ctrl+Y (Cmd on a Mac).
 
 ### Holes and stitch lines
 - Set the hole diameter, the spacing (centre to centre), the distance from the hole's edge to the leather edge, and the stitch-line distance under **Hole & stitch settings**. A piece can have its own settings.
@@ -44,6 +47,7 @@ npm start       # optional: serve the folder on http://localhost:8080
 
 - `js/geometry.js`: contours, fillets, offsets and intersections
 - `js/layout.js`: hole and stitch-line placement
+- `js/boolean.js`: combining shapes (cut away, merge, overlap, choose lines)
 - `js/model.js`: project data, shapes, units
 - `js/render.js`, `js/pdf.js`: SVG and PDF output
 - `js/storage.js`: saving and file download
