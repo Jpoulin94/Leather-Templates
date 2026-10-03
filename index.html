@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Leather Templates</title>
+    <link rel="stylesheet" href="css/style.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">Leather Templates</div>
+      <label class="project-name">
+        <span class="sr">Project name</span>
+        <input id="projectName" type="text" spellcheck="false" />
+      </label>
+      <div class="group">
+        <button id="btnSave" class="primary" title="Save this project in this browser (Ctrl+S)">Save</button>
+        <button id="btnOpen" title="Open a saved project">Open…</button>
+        <button id="btnNew" title="Start a new project">New</button>
+      </div>
+      <div class="group">
+        <button id="btnExportFile" title="Download the project as a file (backup, or to move to another computer)">Download project file</button>
+        <button id="btnImportFile" title="Open a project file">Load project file…</button>
+        <input id="fileInput" type="file" accept=".json,application/json" hidden />
+      </div>
+      <div class="group units">
+        <span>Units</span>
+        <div class="seg" role="radiogroup" aria-label="Units">
+          <button data-units="mm" role="radio">mm</button>
+          <button data-units="in" role="radio">in</button>
+        </div>
+      </div>
+    </header>
+
+    <main class="layout">
+      <aside class="panel left" id="leftPanel"></aside>
+
+      <section class="stage">
+        <div class="toolbar">
+          <div class="seg" role="radiogroup" aria-label="Tool">
+            <button data-tool="select" title="Click edges to add or remove holes; click corner dots to switch corner holes">Edges &amp; corners</button>
+            <button data-tool="draw" title="Click to place points. Click the first point, or press Enter, to finish.">Draw</button>
+            <button data-tool="zero" title="Click an outline edge to place the zero point">Zero point</button>
+          </div>
+          <div class="seg click-mode" role="radiogroup" aria-label="Clicking an edge gives it">
+            <span class="seg-label">Click edge for:</span>
+            <button data-mode="holes"><i class="sw holes"></i>Holes</button>
+            <button data-mode="stitch"><i class="sw stitch"></i>Stitch line</button>
+            <button data-mode="none"><i class="sw none"></i>Nothing</button>
+          </div>
+          <label class="check"><input id="snap" type="checkbox" checked /> Snap to grid</label>
+          <button id="btnFit" title="Zoom to fit the piece">Fit</button>
+        </div>
+        <div class="canvas-wrap">
+          <svg id="canvas" xmlns="http://www.w3.org/2000/svg"></svg>
+          <div id="hint" class="hint"></div>
+        </div>
+      </section>
+
+      <aside class="panel right" id="rightPanel"></aside>
+    </main>
+
+    <dialog id="dialog">
+      <form method="dialog">
+        <h3 id="dialogTitle"></h3>
+        <div id="dialogBody"></div>
+        <menu id="dialogButtons"></menu>
+      </form>
+    </dialog>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+    <script src="js/geometry.js"></script>
+    <script src="js/layout.js"></script>
+    <script src="js/model.js"></script>
+    <script src="js/render.js"></script>
+    <script src="js/pdf.js"></script>
+    <script src="js/storage.js"></script>
+    <script src="js/app.js"></script>
+  </body>
+</html>
