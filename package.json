@@ -1,0 +1,9 @@
+{
+  "name": "leather-templates",
+  "private": true,
+  "description": "Leather cutting template generator",
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "start": "npx http-server -c-1 -p 8080 ."
+  }
+}
