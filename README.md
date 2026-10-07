@@ -11,7 +11,7 @@ The app is a single web page with nothing to install and no internet connection 
 
 ### The screen
 - **Left**: your pieces (click one to work on it, **+ New** to add a rectangle, circle or drawn piece), and the **Stitching** section for the whole project: hole size, spacing, how far holes sit from the edge, how far stitch lines sit from the edge (shown once an edge uses a stitch line), the hole count with its spacing check, and the origin points. Click its title to fold it away; it remembers.
-- **Middle**: the drawing, with the tools down its left side: Select (V), Draw (P), Line (L), Trim (T), add a rectangle, circle or slot, Round corners (R), Origin point (O), and snap to grid. Scroll to zoom and drag the background to pan.
+- **Middle**: the drawing, with the tools down its left side: Select (V), Draw (P), Line (L), Trim (T), Stitch path (K), add a rectangle, circle or slot, Round corners (R), Origin point (O), and snap to grid. Scroll to zoom and drag the background to pan.
 - **Right**: settings for whatever is selected. With nothing selected it shows the whole piece.
 - **Top**: undo and redo, mm or inches, File (new, open, download or load a project file), Save and Export.
 
@@ -38,6 +38,7 @@ Click a straight outline edge and choose **Add a notch to this edge**. It starts
 - **Draw** (pen tool): click points on the grid. Click the first point or press Enter to finish, and Backspace removes the last point. Hold Shift to lock angles to 15° steps. If the piece has no outline yet you draw the outline; otherwise you draw a shape.
 - **Add a rectangle, circle or slot** from the tool rail. It lands in the middle of the piece. A slot is a rectangle with round ends, like a thumb slot; give it a width and a length.
 - **Line** (L): click two points to cut across the piece. The points snap to corners and edges, and the line stretches on its own to the edges it crosses. Then click the part to cut away. The line stays live: click its edge to type how much of each crossed edge to keep, cut away the other part instead, give the new edge holes or a stitch line (it starts with none), or delete it. Its two new corners can be rounded with the Round corners tool. Draw a line across a shape to cut the shape instead.
+- **Stitch path** (K): holes or a stitch line anywhere on the piece, without cutting anything, for stitching another piece on. Click to place points; each click carries the line on from the last one. Points snap to holes, corners and the grid, and Shift gives 15° steps. Press **Finished** or Enter to end it, or click the first point to close it into a loop. The holes sit right on the line, with a hole on each end and each bend (click a bend's dot to switch its hole off, or round it with Round corners). Click the path to switch it to a stitch line, type each leg's length, move it by its start point, or delete it.
 - **Trim** (T): every line is split wherever it crosses another line. Click the pieces you want gone, then Apply, and what's left joins into one shape (for example a rectangle and two circles into a thumb slot). Like Choose lines, the result is fixed lines.
 - **Use it as**: a **Hole** inside the piece (a card slot), **Cut away** from the outline, **Merge** into the outline, or **Overlap** (keep only where they overlap). Combined shapes stay live: move, resize or switch them back at any time and the piece updates. The corners where a combined shape meets the outline can be rounded too.
 - **Line it up** with the outline or another shape (left, centre or right; top, middle or bottom), or centre it on one of the outline's edges.
@@ -46,12 +47,14 @@ Click a straight outline edge and choose **Add a notch to this edge**. It starts
 
 ### Holes and stitch lines
 - Set the hole diameter, the spacing (centre to centre), the distance from the hole's edge to the leather edge, and the stitch-line distance under **Stitching**. Every piece uses the same sizes.
-- **Corner holes**: where two edges with holes meet, a hole lands exactly on the corner, and the spacing between corners (and origin points) is adjusted slightly so the holes divide evenly. Turn it off for one corner by clicking it. The hole count in **Stitching** shows any run whose spacing was adjusted; click one to see it on the drawing.
+- **Spacing is always exact.** Every hole is exactly the set spacing from the next, so a multi-hole punch fits every hole.
+- **Corner holes**: where two edges with holes meet, a hole lands exactly on the corner. Turn it off for one corner by clicking it. If the distance between two corner holes (or an origin, or the bends and ends of a stitch path) isn't a whole number of spaces, the holes still keep the exact spacing and the side ends with one short gap, shown in red. **Stitching** lists each one with fixes: make that side longer or shorter (the nearest lengths that fit), or move the holes on the edge across the corner nearer to or further from that edge. A fix that puts holes nearer the edge than your **Holes from edge** setting is marked "closer". Hover a fix to see the side on the drawing.
+- **Holes from one edge**: click an edge to give it its own distance from the edge to its holes. Leave it empty to use the Stitching setting.
 - **Edges without holes**: where an edge with holes meets an edge without holes, that edge is ignored: the holes keep exactly the set spacing, counted from the nearest corner hole or origin point (or from the start of the edge), and carry on right up to it as long as each leaves at least 0.5 mm of leather. If the next hole would touch or cross that edge, so the edge would cut through a hole on a piece stacked with this one, **Stitching** flags it and rings the hole on the drawing. Click a suggestion to move the edge to the nearest spot that clears the hole, or type your own distance and choose **Longer** or **Shorter**. Edges of notches can't be moved this way; for a Line, you can also type the kept length in its settings.
-- **Origin point**: choose **Place origin point** (or press O), then click a hole or a stitch line. A hole stays put there and the others space out from it; on a stitch line a short tick marks the spot on the print. The outline and each shape can have their own. Give mating pieces the same origin and settings, and their holes line up.
+- **Origin points**: choose **Add an origin point** (or press O), then click a hole or a stitch line. A hole stays put there and the others space out exactly from it; on a stitch line a short tick marks the spot on the print. A piece can have as many as you need, on the outline, shapes or stitch paths. Each gets a letter (A, B, C…) that you can rename under **Stitching**, for example "Pocket". The names are printed next to them.
 
 ### Assemble
-Switch the top bar from **Edit** to **Assemble** to see your pieces stacked flat on top of each other, each in its own colour. Tick the pieces to include on the left. They line up by their origin points; a piece without one is centred on the others.
+Switch the top bar from **Edit** to **Assemble** to see your pieces stacked flat on top of each other, each in its own colour. Tick the pieces to include on the left, bottom first. Each piece lines up on an origin whose name it shares with a piece below it, so a pocket with origin "Pocket" sits on the back's "Pocket" origin while a strap lines up on "Strap". A piece with no shared name puts its first origin on the first piece's; a piece without any origin is centred.
 - Drag a piece to shift it, or type how far it sits from the origin. **↺ 90° / ↻ 90°** rotate it and **Turn over** flips it for a piece that sits face down.
 - **Shared holes**: wherever one piece's holes sit on another piece, the stitch goes through both, so both need a hole there. Holes that don't line up are circled in red, and the panel counts them for each pair of pieces.
 - **Download picture (SVG)** saves the stack at true size with a colour key. The arrangement is saved with the project; go back to **Edit** to change a piece and the stack updates.
@@ -82,7 +85,7 @@ npm start       # optional: serve the folder on http://localhost:8080
 - `js/layout.js`: hole and stitch-line placement
 - `js/boolean.js`: combining shapes (cut away, merge, overlap, choose lines)
 - `js/assembly.js`: the Assemble view's stacking and shared-hole check
-- `js/clearance.js`: edges without holes that cut through a hole, and the moves that clear them
+- `js/clearance.js`: edges without holes that cut through a hole, sides that don't divide evenly, and the fixes for both
 - `js/resolve.js`: builds each piece from its outline, notches, live shapes and cut lines; resizing
 - `js/model.js`: project data, shapes, units
 - `js/render.js`, `js/pdf.js`: SVG and PDF output

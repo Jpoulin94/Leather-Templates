@@ -49,6 +49,7 @@
     resize: '<path d="M4 9V4h5M20 15v5h-5M4 4l7 7M20 20l-7-7"/>',
     x: '<path d="M6 6l12 12M18 6L6 18"/>',
     line: '<path d="M5 19L19 5"/><circle cx="5" cy="19" r="1.8"/><circle cx="19" cy="5" r="1.8"/>',
+    stitchpath: '<path d="M4 18L10 8l6 6 4-8" stroke-dasharray="2 2.6"/><circle cx="4" cy="18" r="1.6"/><circle cx="10" cy="8" r="1.6"/><circle cx="16" cy="14" r="1.6"/><circle cx="20" cy="6" r="1.6"/>',
     scissors: '<circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M20 4L8.1 15.9M14.5 14.5L20 20M8.1 8.1L12 12"/>',
     slot: '<rect x="8" y="3" width="8" height="18" rx="4"/>',
     align: '<path d="M12 3v18"/><rect x="5" y="6" width="14" height="4" rx="1"/><rect x="7" y="14" width="10" height="4" rx="1"/>',
@@ -74,8 +75,8 @@
   let project = S.loadCurrent() || M.newProject();
   const ui = {
     pieceIdx: 0,
-    sel: { type: null, items: [] }, // type: 'edge' | 'corner' | 'shape' | 'notch' | 'line' | null
-    tool: 'select', // 'select' | 'draw' | 'round' | 'origin' | 'line' | 'trim'
+    sel: { type: null, items: [] }, // type: 'edge' | 'corner' | 'shape' | 'notch' | 'line' | 'path' | null
+    tool: 'select', // 'select' | 'draw' | 'round' | 'origin' | 'line' | 'trim' | 'path'
     drawTarget: 'outline', // 'outline' or a shape id while drawing
     brush: null, // corner radius (mm) the round tool applies
     snap: true,
@@ -96,9 +97,9 @@
     alignTarget: 'outline',
     advOpen: false,
     stitchOpen: pref('stitchOpen', true),
-    checkOpen: false,
-    highlight: null, // adjusted spacing section to show on the drawing
-    adjusted: [],
+    highlight: null, // uneven side (index + 1) to show on the drawing
+    pathDraft: null, // points of a stitch path being drawn
+    unevenHover: null,
     clash: null, // flagged edge hovered in the Stitching section
   };
 
@@ -110,6 +111,8 @@
   const shapeNo = (id, pc = piece()) => pc.cutouts.findIndex((c) => c.id === id) + 1;
   const notchById = (id, pc = piece()) => (pc.notches || []).find((n) => n.id === id) || null;
   const lineById = (id, pc = piece()) => (pc.lines || []).find((l) => l.id === id) || null;
+  const pathById = (id, pc = piece()) => (pc.paths || []).find((l) => l.id === id) || null;
+  const pathNo = (id, pc = piece()) => (pc.paths || []).findIndex((l) => l.id === id) + 1;
   const lineReport = (id) => (curLay().resolved.report.lines || {})[id] || {};
   const units = () => project.units;
   const inch = () => units() === 'in';
@@ -133,7 +136,7 @@
 
   function moveContour(c, dx, dy) {
     if (c.start) c.start = { x: round(c.start.x + dx), y: round(c.start.y + dy) };
-    if (c.origin) c.origin = { x: c.origin.x + dx, y: c.origin.y + dy };
+    M.mapOrigins(c, (o) => ({ x: o.x + dx, y: o.y + dy }));
     // Cut lines drawn across a shape move with it.
     if (c.id) linesOn(c.id).forEach((l) => {
       l.a = { x: round(l.a.x + dx), y: round(l.a.y + dy) };
@@ -167,6 +170,24 @@
     return clashCache.list;
   }
 
+  // Sides that don't divide evenly at the set spacing, with their fixes.
+  let unevenCache = { key: null, list: [] };
+  function unevenSides() {
+    const lay = curLay();
+    if (unevenCache.key !== layCache.key) unevenCache = { key: layCache.key, list: LT.clearance.uneven(project, piece(), lay) };
+    return unevenCache.list;
+  }
+
+  // Words for an uneven side: what it is, and the edge across its corner.
+  function unevenNames(u) {
+    const box = G.bbox(curLay().outline.prims) || { minX: 0, maxX: 0, minY: 0, maxY: 0 };
+    if (u.isPath) return { side: `Stitch path ${pathNo(u.where)}`, across: null, leg: true };
+    const owner = u.where === 'outline' ? '' : `Shape ${shapeNo(u.where)}: `;
+    const side = u.own ? edgeName(u.own.prim, box) : 'A side';
+    const across = u.across ? edgeName(u.across.prim, box).toLowerCase() : null;
+    return { side: `${owner}${owner ? side.toLowerCase() : side}`, across, leg: false };
+  }
+
   function clashNames(c) {
     const box = G.bbox(curLay().outline.prims) || { minX: 0, maxX: 0, minY: 0, maxY: 0 };
     const ref = c.cutRef || '';
@@ -197,6 +218,7 @@
     if (p[0] === 'n') return { kind: 'n', id: p[1], side: p[2] || null };
     if (p[0] === 'j') return { kind: 'j', id: p[1], key: p.slice(2).join(':') };
     if (p[0] === 'l') return { kind: 'l', id: p[1], end: p[2] || null };
+    if (p[0] === 'p') return { kind: 'p', id: p[1], idx: Number(p[2]) };
     return { kind: '?' };
   }
 
@@ -211,6 +233,7 @@
       return sh ? edgeProps(sh, r.idx) : null;
     }
     if (r.kind === 'l') return lineById(r.id);
+    if (r.kind === 'p') return pathById(r.id);
     return null;
   }
 
@@ -229,6 +252,13 @@
       ln.corners = ln.corners || {};
       ln.corners[r.end] = ln.corners[r.end] || { fillet: 0, corner: true };
       return ln.corners[r.end];
+    }
+    if (r.kind === 'p') {
+      const pth = pathById(r.id);
+      if (!pth) return null;
+      pth.corners = pth.corners || {};
+      pth.corners[r.idx] = pth.corners[r.idx] || { fillet: 0, corner: true };
+      return pth.corners[r.idx];
     }
     if (r.kind === 'n' && ['L', 'R', 'BL', 'BR'].includes(r.side)) {
       const n = notchById(r.id);
@@ -252,6 +282,7 @@
     if (r.kind === 'o') return 'the outline';
     if (r.kind === 'n') return 'a notch';
     if (r.kind === 'l') return 'a line';
+    if (r.kind === 'p') return `stitch path ${pathNo(r.id)}`;
     if (r.kind === 'c' || r.kind === 'j') return `shape ${shapeNo(r.id)}`;
     return '';
   }
@@ -270,6 +301,8 @@
       const seg = edgeProps(c, e.edge);
       const vref = seg && seg.vref;
       if (!vref || /^n:[^:]+:x$/.test(vref)) return;
+      // An open stitch path's two ends are not bends.
+      if (lc.kind === 'path' && !lc.closed && (e.edge === 0 || e.closing || prev.closing)) return;
       const t1 = G.primEndTangent(prev);
       const t2 = G.primStartTangent(e);
       const sharp = Math.acos(Math.max(-1, Math.min(1, G.dot(t1, t2)))) > G.rad(2);
@@ -280,7 +313,7 @@
   }
 
   function allCorners(lay = curLay()) {
-    return [lay.outline, ...lay.cutouts].flatMap((lc) => cornersOf(lc));
+    return Lay.allOf(lay).flatMap((lc) => cornersOf(lc));
   }
 
   // Distinct radii in use on this piece, for colours and the legend.
@@ -326,10 +359,11 @@
     if (t === 'shape') ui.sel.items = ui.sel.items.filter((id) => id === 'outline' || shapeById(id));
     else if (t === 'notch') ui.sel.items = ui.sel.items.filter((id) => notchById(id));
     else if (t === 'line') ui.sel.items = ui.sel.items.filter((id) => lineById(id));
+    else if (t === 'path') ui.sel.items = ui.sel.items.filter((id) => pathById(id));
     else if (t === 'edge' || t === 'corner') {
       const lay = curLay();
       const live = new Set();
-      [lay.outline, ...lay.cutouts].forEach((lc) =>
+      Lay.allOf(lay).forEach((lc) =>
         lc.contour.segments.forEach((s) => {
           if (t === 'edge' && s.ref) live.add(s.ref);
           if (t === 'corner' && s.vref) live.add(s.vref);
@@ -352,6 +386,8 @@
     ui.combine = null;
     ui.trim = null;
     ui.lineStart = null;
+    ui.pathDraft = null;
+    if (ui.tool === 'path') ui.tool = 'select';
     ui.dirty = true;
     S.saveCurrent(project);
     renderAll();
@@ -540,6 +576,9 @@
     } else if (ui.sel.type === 'notch') {
       pc.notches = pc.notches.filter((n) => !ui.sel.items.includes(n.id));
       toast('Notch deleted. Undo brings it back.');
+    } else if (ui.sel.type === 'path') {
+      pc.paths = (pc.paths || []).filter((l) => !ui.sel.items.includes(l.id));
+      toast('Stitch path deleted. Undo brings it back.');
     } else return;
     clearSel();
     commit();
@@ -633,6 +672,86 @@
     const mode = ui.drawTarget === 'outline' ? 'holes' : 'none';
     c.segments.push(M.seg('line', { length: round(L), angle: round(((G.deg(Math.atan2(d.y, d.x)) % 360) + 360) % 360), mode }));
     commit();
+  }
+
+  // ---------------------------------------------------------------------
+  // Stitch paths: click points to make a line of holes (or stitching)
+  // anywhere on the piece. It cuts nothing.
+
+  function snapPathPoint(pt) {
+    const lay = curLay();
+    const tol = 10 / ui.view.scale;
+    const draft = ui.pathDraft || [];
+    if (draft.length >= 3 && G.dist(pt, draft[0]) <= tol) return { ...draft[0], closes: true };
+    let best = null;
+    const near = (q, kind) => {
+      const d = G.dist(q, pt);
+      if (d <= tol && (!best || d < best.d)) best = { d, pt: q, kind };
+    };
+    Lay.allOf(lay).forEach((lc) => lc.holes.forEach((h) => near(h, 'hole')));
+    allCorners(lay).forEach((c) => near(c.pt, 'corner'));
+    (piece().paths || []).forEach((p) => p.points.forEach((q) => near(q, 'point')));
+    draft.forEach((q) => near(q, 'point'));
+    if (best) return { ...best.pt, snapped: best.kind };
+    const last = draft[draft.length - 1];
+    if (last && ui.shift) {
+      const d = G.sub(pt, last);
+      const a = Math.round(Math.atan2(d.y, d.x) / G.rad(15)) * G.rad(15);
+      let L = G.len(d);
+      if (ui.snap) L = Math.round(L / minorStep()) * minorStep();
+      return { x: last.x + L * Math.cos(a), y: last.y + L * Math.sin(a) };
+    }
+    if (ui.snap) {
+      const st = minorStep();
+      return { x: Math.round(pt.x / st) * st, y: Math.round(pt.y / st) * st };
+    }
+    return pt;
+  }
+
+  function addPathPoint(world) {
+    const pt = snapPathPoint(world);
+    ui.pathDraft = ui.pathDraft || [];
+    if (pt.closes) {
+      finishPath(true);
+      return;
+    }
+    const p = { x: round(pt.x), y: round(pt.y) };
+    const last = ui.pathDraft[ui.pathDraft.length - 1];
+    if (last && G.dist(last, p) < 1e-3) return;
+    ui.pathDraft.push(p);
+    renderCanvas();
+    renderRight();
+  }
+
+  function finishPath(closed = false) {
+    const pts = ui.pathDraft || [];
+    ui.pathDraft = null;
+    ui.tool = 'select';
+    if (pts.length < 2) {
+      if (pts.length) toast('A stitch path needs at least two points.');
+      renderAll();
+      return;
+    }
+    const pth = M.newPath(pts, closed && pts.length >= 3, 'holes');
+    const pc = piece();
+    pc.paths = pc.paths || [];
+    pc.paths.push(pth);
+    ui.sel = { type: 'path', items: [pth.id] };
+    commit();
+  }
+
+  // Change the length of leg k of a path: the points after it move along.
+  function setPathLeg(pth, k, L) {
+    const a = pth.points[k];
+    const b = pth.points[(k + 1) % pth.points.length];
+    const u = G.norm(G.sub(b, a));
+    const delta = G.mul(u, L - G.dist(a, b));
+    if (k + 1 >= pth.points.length) {
+      // The closing leg of a loop: move the first point back instead.
+      pth.points[0] = { x: round(pth.points[0].x + delta.x), y: round(pth.points[0].y + delta.y) };
+      return;
+    }
+    for (let j = k + 1; j < pth.points.length; j++) pth.points[j] = { x: round(pth.points[j].x + delta.x), y: round(pth.points[j].y + delta.y) };
   }
 
   // ---------------------------------------------------------------------
@@ -853,9 +972,9 @@
       let rest = contours;
       if (owners.includes('outline')) {
         if (!contours.length) return;
-        const origin = pc.outline.origin;
+        const origins = M.originsOf(pc.outline);
         pc.outline = contours[0];
-        if (origin) pc.outline.origin = origin;
+        pc.outline.origins = origins;
         pc.notches = [];
         pc.cutouts.filter(isLiveOp).forEach((c) => dropLinesOn(c.id));
         pc.cutouts = pc.cutouts.filter((c) => !isLiveOp(c));
@@ -990,6 +1109,8 @@
     const combining = ui.combine || ui.trim;
     const drawing = ui.tool === 'draw' || ui.tool === 'line';
     const contours = [{ lc: lay.outline, kind: 'outline' }, ...lay.cutouts.map((lc) => ({ lc, kind: 'cutout' }))];
+    const pathLcs = lay.paths.map((lc) => ({ lc, kind: 'path' }));
+    const selPath = new Set(selected('path'));
     const selEdges = new Set(selected('edge'));
     const selNotch = new Set(selected('notch'));
     const selShape = new Set(selected('shape'));
@@ -1080,16 +1201,43 @@
       });
     }
 
-    // Highlighted spacing section
-    if (ui.highlight && ui.adjusted[ui.highlight - 1]) {
-      out.push(`<path d="${sectionPath(ui.adjusted[ui.highlight - 1])}" fill="none" stroke="var(--zero)" stroke-width="6" stroke-opacity="0.45" stroke-linecap="round" pointer-events="none" vector-effect="non-scaling-stroke"/>`);
+    // Stitch paths: a faint guide along the path (nothing is cut), the
+    // holes or stitching on it, and a wide invisible line to click.
+    if (!combining) {
+      pathLcs.forEach(({ lc }) => {
+        const on = selPath.has(lc.src);
+        const legs = lc.prims.filter((p) => p.mode !== 'none');
+        const d = R.pathData(legs, flip, false);
+        if (on) out.push(`<path d="${d}" fill="none" stroke="color-mix(in srgb, var(--accent) 35%, transparent)" stroke-width="10" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" pointer-events="none"/>`);
+        out.push(`<path d="${d}" fill="none" stroke="var(--edge-${lc.prims.some((p) => p.mode === 'stitch') ? 'stitch' : 'holes'})" stroke-width="1" stroke-opacity="0.45" stroke-dasharray="1 3" vector-effect="non-scaling-stroke" pointer-events="none"/>`);
+        lc.stitch.forEach((st) => out.push(`<path d="${R.pathData(st.prims, flip, st.closed)}" fill="none" stroke="var(--edge-stitch)" stroke-width="1.4" stroke-dasharray="5 3" vector-effect="non-scaling-stroke" pointer-events="none"/>`));
+        lc.holes.forEach((hp) => out.push(`<circle cx="${num(hp.x)}" cy="${num(-hp.y)}" r="${num(lay.holeRadius)}" fill="color-mix(in srgb, var(--edge-holes) 16%, var(--canvas))" stroke="var(--edge-holes)" stroke-width="1.2" vector-effect="non-scaling-stroke" pointer-events="none"/>`));
+        if (ui.tool === 'select') out.push(`<path class="hit" d="${d}" fill="none" stroke="transparent" stroke-width="14" stroke-linecap="round" vector-effect="non-scaling-stroke" data-path="${lc.src}"><title>Stitch path ${pathNo(lc.src)}</title></path>`);
+      });
+    }
+
+    // Uneven sides: the short gap, and the whole side when picked.
+    if (!combining) {
+      const ul = unevenSides();
+      ul.forEach((u, i) => {
+        const sec = u.section;
+        const L = G.pathLength(sec.path);
+        const wrap = (x) => (sec.closed ? ((x % L) + L) % L : Math.max(0, Math.min(L, x)));
+        const a = sec.oddEnd === 'to' ? sec.to - u.gap : sec.from;
+        const b = sec.oddEnd === 'to' ? sec.to : sec.from + u.gap;
+        const pa = G.pathPointAt(sec.path, wrap(a));
+        const pb = G.pathPointAt(sec.path, wrap(b));
+        const on = ui.highlight === i + 1 || ui.unevenHover === i;
+        if (on) out.push(`<path d="${sectionPath(sec)}" fill="none" stroke="var(--zero)" stroke-width="6" stroke-opacity="0.35" stroke-linecap="round" pointer-events="none" vector-effect="non-scaling-stroke"/>`);
+        out.push(`<path d="M${num(pa.x)} ${num(-pa.y)}L${num(pb.x)} ${num(-pb.y)}" stroke="var(--danger)" stroke-width="${on ? 4 : 3}" stroke-linecap="round" pointer-events="none" vector-effect="non-scaling-stroke"><title>Short gap: ${fmt(u.gap)} ${units()}</title></path>`);
+      });
     }
 
     // Corner dots
     if (!combining && (ui.tool === 'select' || ui.tool === 'round')) {
       const selC = new Set(selected('corner'));
       const big = ui.tool === 'round';
-      contours.forEach(({ lc }) => {
+      [...contours, ...pathLcs].forEach(({ lc }) => {
         cornersOf(lc).forEach((cn) => {
           const sel = selC.has(cn.vref);
           const r = big ? 6 : sel ? 6 : 4.5;
@@ -1115,17 +1263,43 @@
       });
     }
 
-    // Origin points
-    contours.forEach(({ lc }) => {
-      const o = lc.origin;
-      if (!o) return;
-      const z = o.pt;
-      const r = px(7);
-      const tick = o.kind === 'stitch' ? Lay.originTick(o, Math.max(px(9), 3)) : null;
-      out.push(`<g stroke="var(--zero)" stroke-width="2" fill="none" pointer-events="none">
-        <circle cx="${num(z.x)}" cy="${num(-z.y)}" r="${num(o.kind === 'hole' ? Math.max(r, lay.holeRadius + px(4)) : r)}" vector-effect="non-scaling-stroke"/>
-        ${tick ? `<path d="M${num(tick.a.x)} ${num(-tick.a.y)}L${num(tick.b.x)} ${num(-tick.b.y)}" stroke-width="3" vector-effect="non-scaling-stroke"/>` : `<path d="M${num(z.x - r * 1.7)} ${num(-z.y)}H${num(z.x + r * 1.7)}M${num(z.x)} ${num(-z.y - r * 1.7)}V${num(-z.y + r * 1.7)}" vector-effect="non-scaling-stroke"/>`}</g>`);
+    // Origin points, each with its name
+    [...contours, ...pathLcs].forEach(({ lc }) => {
+      (lc.origins || []).forEach((o) => {
+        const z = o.pt;
+        const r = px(7);
+        const tick = o.kind === 'stitch' ? Lay.originTick(o, Math.max(px(9), 3)) : null;
+        const rr = o.kind === 'hole' ? Math.max(r, lay.holeRadius + px(4)) : r;
+        out.push(`<g stroke="var(--zero)" stroke-width="2" fill="none" pointer-events="none">
+          <circle cx="${num(z.x)}" cy="${num(-z.y)}" r="${num(rr)}" vector-effect="non-scaling-stroke"/>
+          ${tick ? `<path d="M${num(tick.a.x)} ${num(-tick.a.y)}L${num(tick.b.x)} ${num(-tick.b.y)}" stroke-width="3" vector-effect="non-scaling-stroke"/>` : `<path d="M${num(z.x - r * 1.7)} ${num(-z.y)}H${num(z.x + r * 1.7)}M${num(z.x)} ${num(-z.y - r * 1.7)}V${num(-z.y + r * 1.7)}" vector-effect="non-scaling-stroke"/>`}</g>`);
+        if (o.name) {
+          const w = px(o.name.length * 7.4 + 10);
+          const tx = z.x + rr + px(4);
+          const ty = -z.y - rr - px(4);
+          out.push(`<g pointer-events="none"><rect x="${num(tx)}" y="${num(ty - px(16))}" width="${num(w)}" height="${num(px(18))}" rx="${num(px(4))}" fill="var(--zero)"/><text x="${num(tx + px(5))}" y="${num(ty - px(3))}" font-size="${num(px(12))}" font-weight="600" fill="#fff">${esc(o.name)}</text></g>`);
+        }
+      });
     });
+
+    // Stitch path being drawn
+    if (ui.tool === 'path') {
+      const pts = ui.pathDraft || [];
+      const m = ui.mouse ? snapPathPoint(ui.mouse) : null;
+      const all = m ? [...pts, m] : pts;
+      if (all.length > 1) out.push(`<path d="${all.map((q, i) => `${i ? 'L' : 'M'}${num(q.x)} ${num(-q.y)}`).join('')}" fill="none" stroke="var(--edge-holes)" stroke-width="2" stroke-dasharray="${pts.length ? '0' : '4 3'}" vector-effect="non-scaling-stroke" pointer-events="none"/>`);
+      if (m && pts.length) out.push(`<path d="M${num(pts[pts.length - 1].x)} ${num(-pts[pts.length - 1].y)}L${num(m.x)} ${num(-m.y)}" stroke="var(--panel)" stroke-width="2" stroke-dasharray="3 3" vector-effect="non-scaling-stroke" pointer-events="none"/>`);
+      pts.forEach((q, i) => out.push(`<circle cx="${num(q.x)}" cy="${num(-q.y)}" r="${num(px(i === 0 && pts.length >= 3 ? 6 : 4))}" fill="${i === 0 ? 'var(--panel)' : 'var(--edge-holes)'}" stroke="var(--edge-holes)" stroke-width="2" vector-effect="non-scaling-stroke" pointer-events="none"/>`));
+      if (m) {
+        out.push(`<circle cx="${num(m.x)}" cy="${num(-m.y)}" r="${num(px(m.snapped || m.closes ? 6 : 4))}" fill="${m.snapped || m.closes ? 'var(--panel)' : 'var(--edge-holes)'}" stroke="var(--edge-holes)" stroke-width="2" vector-effect="non-scaling-stroke" pointer-events="none"/>`);
+        const last = pts[pts.length - 1];
+        if (last) {
+          const d = G.sub(m, last);
+          const lbl = `${fmt(G.len(d))} ${units()} · ${num(Math.round(((G.deg(Math.atan2(d.y, d.x)) % 360) + 360) % 360 * 10) / 10)}°`;
+          out.push(`<g transform="translate(${num(m.x + px(12))} ${num(-m.y - px(12))})" pointer-events="none"><rect x="0" y="${num(-px(15))}" width="${num(px(lbl.length * 6.6 + 12))}" height="${num(px(20))}" rx="${num(px(5))}" fill="var(--ink)"/><text x="${num(px(6))}" y="${num(-px(1))}" font-size="${num(px(12))}" fill="var(--bg)">${esc(lbl)}</text></g>`);
+        }
+      }
+    }
 
     // Drawing preview
     if (ui.tool === 'draw') {
@@ -1196,7 +1370,14 @@
           ? 'Click the second point · it stretches to the edges · Shift for 15° steps'
           : 'Click the first point of the line · it snaps to corners and edges';
     } else if (ui.tool === 'origin') {
-      msg = 'Click a hole or a stitch line to make it the origin point · Esc to cancel';
+      msg = 'Click a hole or a stitch line to add an origin point there · Esc to cancel';
+    } else if (ui.tool === 'path') {
+      const n = (ui.pathDraft || []).length;
+      msg = !n
+        ? 'Click to start the stitch path · it snaps to holes, corners and the grid'
+        : `Click to carry the path on · Enter or Finished to end${n >= 3 ? ' · click the first point to close it' : ''} · Backspace removes the last point · Esc cancels`;
+    } else if (ui.sel.type === 'path') {
+      msg = 'Change the stitch path on the right · H holes, S stitch line · Delete to remove';
     } else if (ui.tool === 'round') {
       msg = `Click corners to round them ${fmt(ui.brush || 0)} ${units()} · click again to make sharp · Esc when done`;
     } else if (ui.sel.type === 'edge' || ui.sel.type === 'corner') {
@@ -1225,7 +1406,7 @@
     const pc = piece();
     const tol = 14 / ui.view.scale;
     let best = null;
-    const contours = [{ lc: lay.outline, src: 'outline' }, ...lay.cutouts.map((lc) => ({ lc, src: lc.src }))];
+    const contours = [{ lc: lay.outline, src: 'outline' }, ...lay.cutouts.map((lc) => ({ lc, src: lc.src })), ...lay.paths.map((lc) => ({ lc, src: lc.src }))];
     contours.forEach(({ lc, src }) => {
       lc.holes.forEach((hp) => {
         const d = G.dist(hp, world);
@@ -1248,9 +1429,19 @@
       toast('That cutout comes from combining shapes, so it can’t have its own origin.');
       return;
     }
-    const target = best.src === 'outline' ? pc.outline : shapeById(best.src);
-    target.origin = { x: round(best.pt.x), y: round(best.pt.y) };
+    const target = best.src === 'outline' ? pc.outline : shapeById(best.src) || pathById(best.src);
+    if (!target) return;
+    const taken = M.pieceOrigins(pc).find(({ o }) => G.dist(o, best.pt) < 1e-3);
+    if (taken) {
+      toast(`Origin ${taken.o.name} is already there.`);
+      return;
+    }
+    const name = M.nextOriginName(pc);
+    target.origins = [...M.originsOf(target), { id: M.uid(), name, x: round(best.pt.x), y: round(best.pt.y) }];
+    delete target.origin;
     ui.tool = 'select';
+    ui.stitchOpen = true;
+    toast(`Origin ${name} placed. Rename it under Stitching.`);
     commit();
   }
 
@@ -1272,6 +1463,10 @@
     }
     if (ui.tool === 'draw') {
       addDrawPoint(world);
+      return;
+    }
+    if (ui.tool === 'path') {
+      addPathPoint(world);
       return;
     }
     const part = target && target.closest ? target.closest('[data-part]') : null;
@@ -1298,7 +1493,7 @@
       placeOrigin(world);
       return;
     }
-    const el = target && target.closest ? target.closest('[data-ref],[data-vref],[data-shape],[data-line]') : null;
+    const el = target && target.closest ? target.closest('[data-ref],[data-vref],[data-shape],[data-line],[data-path]') : null;
     if (ui.tool === 'round') {
       if (el && el.dataset.vref) brushCorner(el.dataset.vref);
       else toast('Click a corner dot to round it.');
@@ -1321,6 +1516,11 @@
     }
     if (!el) {
       clearSel();
+      renderAll();
+      return;
+    }
+    if (el.dataset.path) {
+      ui.sel = { type: 'path', items: [el.dataset.path] };
       renderAll();
       return;
     }
@@ -1380,7 +1580,7 @@
       items: list.map((sh) => ({
         id: sh.id,
         start: { ...sh.start },
-        origin: sh.origin ? { ...sh.origin } : null,
+        origins: M.originsOf(sh).map((o) => ({ ...o })),
         lines: linesOn(sh.id).map((l) => ({ id: l.id, a: { ...l.a }, b: { ...l.b } })),
       })),
     };
@@ -1419,7 +1619,7 @@
       const sh = shapeById(it.id);
       if (!sh) return;
       sh.start = { x: round(it.start.x + sx.move), y: round(it.start.y + sy.move) };
-      if (it.origin) sh.origin = { x: it.origin.x + sx.move, y: it.origin.y + sy.move };
+      sh.origins = it.origins.map((o) => ({ ...o, x: o.x + sx.move, y: o.y + sy.move }));
       it.lines.forEach((l0) => {
         const l = lineById(l0.id);
         if (!l) return;
@@ -1480,7 +1680,7 @@
         ui.view.cy = ui.ptr.cy + dy / ui.view.scale;
       }
       if (ui.ptr.moved) renderCanvas();
-    } else if (ui.tool === 'draw' || ui.tool === 'line') {
+    } else if (ui.tool === 'draw' || ui.tool === 'line' || ui.tool === 'path') {
       renderCanvas();
     }
   });
@@ -1499,7 +1699,7 @@
     if (p && !p.moved && p.button === 0) handleCanvasClick(p.target, toWorld(e), p.shift);
   });
   svg.addEventListener('pointerleave', () => {
-    if (!ui.ptr && (ui.tool === 'draw' || ui.tool === 'line')) {
+    if (!ui.ptr && (ui.tool === 'draw' || ui.tool === 'line' || ui.tool === 'path')) {
       ui.mouse = null;
       renderCanvas();
     }
@@ -1535,6 +1735,11 @@
     }
     ui.lineStart = null;
     ui.linePick = null;
+    if (ui.tool === 'path' && tool !== 'path' && ui.pathDraft && ui.pathDraft.length > 1) {
+      finishPath(false);
+      if (tool === 'select') return;
+    }
+    ui.pathDraft = null;
     if (ui.tool === 'draw' && tool !== 'draw') finishDraw();
     if (tool === 'trim') {
       if (ui.tool === 'trim') {
@@ -1561,6 +1766,7 @@
       btn('data-tool="draw"', 'pen', piece().outline.segments.length ? 'Draw a shape (P)' : 'Draw the outline (P)', ui.tool === 'draw'),
       btn('data-tool="line"', 'line', 'Line: cut across the piece (L)', ui.tool === 'line'),
       btn('data-tool="trim"', 'scissors', 'Trim lines (T)', ui.tool === 'trim'),
+      btn('data-tool="path"', 'stitchpath', 'Stitch path: holes anywhere (K)', ui.tool === 'path'),
       '<hr>',
       btn('data-add="rect"', 'rect', 'Add a rectangle', false),
       btn('data-add="circle"', 'circle', 'Add a circle', false),
@@ -1645,42 +1851,39 @@
       .join('');
   }
 
-  function originLabel(o) {
-    if (!o) return 'Not set';
-    return o.kind === 'hole' ? 'On a hole' : 'On the stitch line';
-  }
-
   function stitchSection() {
     const d = project.defaults;
     const lay = curLay();
     const pc = piece();
-    const all = [lay.outline, ...lay.cutouts];
+    const all = Lay.allOf(lay);
     const holes = all.reduce((n, c) => n + c.holes.length, 0);
-    ui.adjusted = [];
-    all.forEach((c) => c.sections.forEach((s) => {
-      if (s.actual && Math.abs(s.actual - s.requested) > 0.005) ui.adjusted.push(s);
-    }));
-    const adj = ui.adjusted;
-    const origins = [];
-    if (pc.outline.segments.length) origins.push({ label: 'Outline', key: 'outline', set: !!pc.outline.origin, lay: lay.outline });
-    lay.cutouts.forEach((lc) => {
-      if (!lc.src) return;
-      const sh = shapeById(lc.src);
-      if (sh && sh.origin) origins.push({ label: `Shape ${shapeNo(sh.id)}`, key: sh.id, set: true, lay: lc });
-    });
-    const anyOrigin = origins.some((o) => o.set);
-    const summary = [`${fmt(d.holeDiameter)} ${units()} holes`, `${fmt(d.spacing)} ${units()} apart`, holes ? `${holes} holes` : null, anyOrigin ? 'origin set' : null]
+    const ul = unevenSides();
+    const ors = M.pieceOrigins(pc);
+    const summary = [`${fmt(d.holeDiameter)} ${units()} holes`, `${fmt(d.spacing)} ${units()} apart`, holes ? `${holes} holes` : null, ors.length ? `${ors.length} origin${ors.length === 1 ? '' : 's'}` : null]
       .filter(Boolean)
       .join(' · ');
     const check = !holes
-      ? '<p class="note">No edges have holes yet. Click an edge and choose Holes.</p>'
-      : adj.length
-        ? `<details class="check" id="checkDetails" ${ui.checkOpen ? 'open' : ''}>
-            <summary>${holes} holes · ${adj.length} run${adj.length === 1 ? '' : 's'} adjusted slightly</summary>
-            <p class="note">Spacing on these runs is stretched or squeezed a little so a hole lands on each corner. Click one to see it.</p>
-            ${adj.map((s, i) => `<button class="run ${ui.highlight === i + 1 ? 'on' : ''}" data-run="${i + 1}">${fmt(s.length)} ${units()} run · ${fmt(s.actual)} apart</button>`).join('')}
-          </details>`
+      ? '<p class="note">No edges have holes yet. Click an edge and choose Holes, or draw a stitch path.</p>'
+      : ul.length
+        ? `<div class="warn">${holes} holes at exactly ${fmt(d.spacing)} ${units()}, but ${ul.length} side${ul.length === 1 ? ' doesn’t' : 's don’t'} divide evenly, so ${ul.length === 1 ? 'it ends' : 'each ends'} with a short gap (red on the drawing).</div>`
         : `<div class="ok">${icon('check')} ${holes} holes, all at exactly ${fmt(d.spacing)} ${units()}</div>`;
+    const unevenHtml = ul
+      .map((u, i) => {
+        const n = unevenNames(u);
+        const btn = (f, label) => `<button class="small${f.closer ? ' warnbtn' : ''}" data-unevenfix="${i}" data-kind="${f.kind}" data-amount="${f.amount}">${label}</button>`;
+        const what = n.leg ? 'this leg' : n.side.toLowerCase().startsWith('shape') ? 'this side' : `the ${n.side.toLowerCase()}`;
+        const moves = u.fix.outline.map((f) => btn(f, `${fmt(Math.abs(f.amount))} ${units()} ${f.amount > 0 ? 'longer' : 'shorter'}`)).join('');
+        const dists = u.fix.distance.map((f) => btn(f, `${fmt(f.amount)} ${units()} from edge${f.closer ? ' (closer)' : ''}`)).join('');
+        const between = u.oddKind === 'origin' ? 'origin' : u.isPath ? 'bend or end' : 'corner hole';
+        return `<div class="clash uneven ${ui.unevenHover === i || ui.highlight === i + 1 ? 'on' : ''}" data-uneven="${i}">
+          <p><b>${esc(n.side)}: ${fmt(u.gap)} ${units()} short gap.</b> ${fmt(u.length)} ${units()} from hole to ${between} isn’t a whole number of ${fmt(d.spacing)} ${units()} spaces.</p>
+          ${moves ? `<div class="clash-h">Make ${esc(what)}</div><div class="clash-fixes two">${moves}</div>` : ''}
+          ${dists ? `<div class="clash-h">Or put the holes on the ${esc(n.across)}</div><div class="clash-fixes two">${dists}</div>
+            ${u.fix.distance.some((f) => f.closer) ? `<p class="note">“Closer” is nearer the edge than your ${fmt(d.edgeDistance)} ${units()}.</p>` : ''}` : ''}
+          ${!moves && !dists ? '<p class="note">Move one of the origins so they sit a whole number of spaces apart.</p>' : ''}
+        </div>`;
+      })
+      .join('');
     const clashHtml = clashes()
       .map((c, i) => {
         const n = clashNames(c);
@@ -1698,9 +1901,15 @@
         </div>`;
       })
       .join('');
-    const originRows = origins
-      .map((o) => `<div class="origin-row"><span><b>${esc(o.label)}</b> <span class="muted">${o.set ? originLabel(o.lay.origin) : 'Not set'}</span></span>
-          ${o.set ? `<button class="icon-btn" data-clear-origin="${esc(o.key)}" title="Remove" aria-label="Remove origin">${icon('x')}</button>` : ''}</div>`)
+    const whereName = (x) => (x.kind === 'outline' ? 'Outline' : x.kind === 'shape' ? `Shape ${shapeNo(x.owner)}` : `Stitch path ${pathNo(x.owner)}`);
+    const laid = (x) => all.flatMap((c) => c.origins || []).find((o) => o.id === x.o.id);
+    const originRows = ors
+      .map((x) => {
+        const l = laid(x);
+        return `<div class="origin-row"><input class="origin-name" type="text" maxlength="16" data-originname="${esc(x.o.id)}" value="${esc(x.o.name || '')}" aria-label="Origin name">
+          <span class="muted">${esc(whereName(x))}${l ? (l.kind === 'hole' ? ', on a hole' : ', on a stitch line') : ', not on any holes'}</span>
+          <button class="icon-btn" data-clear-origin="${esc(x.o.id)}" title="Remove" aria-label="Remove origin">${icon('x')}</button></div>`;
+      })
       .join('');
     return `<details class="stitch-panel" id="stitchPanel" ${ui.stitchOpen ? 'open' : ''}>
       <summary><span class="t">Stitching</span><span class="sum">${esc(summary)}</span></summary>
@@ -1708,11 +1917,12 @@
         <div class="grid2">${settingsFields(d)}</div>
         <div class="sub-h">Hole count</div>
         ${check}
+        ${unevenHtml}
         ${clashHtml}
         <div class="sub-h">Origin point</div>
         ${originRows}
-        <button class="small ${ui.tool === 'origin' ? 'primary' : ''}" data-tool-start="origin">${icon('target')} ${ui.tool === 'origin' ? 'Click a hole or stitch line…' : 'Place origin point'}</button>
-        <p class="note">A hole always lands on the origin, or a tick marks it on a stitch line, so pieces that share one line up.</p>
+        <button class="small ${ui.tool === 'origin' ? 'primary' : ''}" data-tool-start="origin">${icon('target')} ${ui.tool === 'origin' ? 'Click a hole or stitch line…' : 'Add an origin point'}</button>
+        <p class="note">A hole always lands on each origin, or a tick marks it on a stitch line. Give two pieces an origin with the same name and they line up on it in Assemble.</p>
       </div></details>`;
   }
 
@@ -1744,8 +1954,6 @@
       ui.stitchOpen = sp.open;
       setPref('stitchOpen', sp.open);
     });
-    const cd = $('#checkDetails');
-    if (cd) cd.addEventListener('toggle', () => (ui.checkOpen = cd.open));
   }
 
   $('#leftPanel').addEventListener('click', async (e) => {
@@ -1776,11 +1984,15 @@
       toast('Piece deleted. Undo brings it back.');
       return;
     }
-    if (t.dataset.run) {
-      const k = Number(t.dataset.run);
-      ui.highlight = ui.highlight === k ? null : k;
-      renderLeft();
-      renderCanvas();
+    if (t.dataset.unevenfix !== undefined) {
+      const u = unevenSides()[Number(t.dataset.unevenfix)];
+      if (!u || !LT.clearance.applyFix(piece(), u, t.dataset.kind, Number(t.dataset.amount))) {
+        toast('That can’t be changed from here.');
+        return;
+      }
+      ui.highlight = null;
+      ui.unevenHover = null;
+      commit();
       return;
     }
     if (t.dataset.clashfix !== undefined) {
@@ -1800,12 +2012,11 @@
       return;
     }
     if (t.dataset.clearOrigin) {
-      const k = t.dataset.clearOrigin;
-      if (k === 'outline') delete piece().outline.origin;
-      else {
-        const sh = shapeById(k);
-        if (sh) delete sh.origin;
-      }
+      const id = t.dataset.clearOrigin;
+      M.pieceOrigins(piece()).forEach(({ holder }) => {
+        holder.origins = M.originsOf(holder).filter((o) => o.id !== id);
+        delete holder.origin;
+      });
       commit();
       return;
     }
@@ -1818,6 +2029,13 @@
 
   // Hovering a flagged edge in the list rings its hole on the drawing.
   $('#leftPanel').addEventListener('mouseover', (e) => {
+    const ue = e.target.closest('[data-uneven]');
+    const uk = ue ? Number(ue.dataset.uneven) : null;
+    if (uk !== (ui.unevenHover ?? null)) {
+      ui.unevenHover = uk;
+      $$('[data-uneven]').forEach((x) => x.classList.toggle('on', Number(x.dataset.uneven) === uk));
+      renderCanvas();
+    }
     const el = e.target.closest('[data-clash]');
     const k = el ? Number(el.dataset.clash) : null;
     if (k === (ui.clash ?? null)) return;
@@ -1836,6 +2054,27 @@
     assign(v);
     commit();
   }
+
+  $('#leftPanel').addEventListener('change', (e) => {
+    const t = e.target;
+    if (!t.dataset.originname) return;
+    const name = t.value.trim();
+    const all = M.pieceOrigins(piece());
+    const me = all.find((x) => x.o.id === t.dataset.originname);
+    if (!me) return;
+    if (!name) {
+      t.value = me.o.name;
+      return;
+    }
+    if (all.some((x) => x !== me && String(x.o.name).toUpperCase() === name.toUpperCase())) {
+      t.classList.add('bad');
+      toast('Another origin on this piece already has that name.');
+      return;
+    }
+    me.holder.origins = M.originsOf(me.holder).map((o) => (o.id === me.o.id ? { ...o, name } : o));
+    delete me.holder.origin;
+    commit();
+  });
 
   $('#leftPanel').addEventListener('change', (e) => {
     const t = e.target;
@@ -1975,7 +2214,7 @@
         <p class="note">Pick a size, then click the corner dots you want rounded. Click a corner again to make it sharp.</p>
         ${radiusLegend()}</div>
       ${corners.length > 1 ? `<div class="card"><label class="switch"><span>Hole on every corner</span><input type="checkbox" id="allCorners" ${allOn ? 'checked' : ''}></label>
-        <p class="note">Spacing adjusts slightly so a hole lands exactly on each corner. Click a corner to turn just that one off.</p></div>` : ''}
+        <p class="note">A hole lands exactly on each corner and the spacing stays exact; a side that doesn’t divide evenly is flagged under Stitching. Click a corner to turn just that one off.</p></div>` : ''}
       ${advancedSection(c)}`;
   }
 
@@ -2019,8 +2258,17 @@
       }
     }
     const wheres = [...new Set(items.map(refWhere))];
+    const dists = items.map((r) => {
+      const t = edgeTarget(r);
+      return t && t.edgeDist !== undefined && t.edgeDist !== null && t.edgeDist !== '' ? Number(t.edgeDist) : null;
+    });
+    const dist = dists.every((x) => x === dists[0]) ? dists[0] : undefined;
+    const ownDist = modes.includes('holes') && items.some((r) => edgeTarget(r))
+      ? `<label class="fld" style="margin-top:10px" title="Leave empty to use the Stitching setting"><span>Holes from this edge</span>${numInput(`data-edgedist="1" placeholder="${fmt(project.defaults.edgeDistance)} (Stitching)"`, dist === undefined || dist === null ? '' : dist)}</label>
+        <p class="note">${dist === undefined ? 'Mixed. ' : ''}Empty uses the Stitching setting (${fmt(project.defaults.edgeDistance)} ${units()}).</p>`
+      : '';
     return `${head('edge', one ? edgeLabel(one) : `${items.length} edges`, `On ${wheres.join(', ')}`)}
-      <div class="card"><h4>Along this edge</h4>${modeSeg(commonValue(modes))}</div>
+      <div class="card"><h4>Along this edge</h4>${modeSeg(commonValue(modes))}${ownDist}</div>
       ${notchBtn}
       ${detail ? `<div class="card"><h4>Size</h4>${detail}</div>` : ''}
       <div class="row"><button class="small" data-selall="edge">Select all outline edges</button><button class="small ghost" data-deselect="1">Done</button></div>`;
@@ -2195,9 +2443,43 @@
       <div class="row"><button class="primary" id="finishDraw">${icon('check')} Finish</button><button id="undoPoint" ${c.start ? '' : 'disabled'}>Remove last point</button></div>`;
   }
 
+  function renderPathToolInspector() {
+    const n = (ui.pathDraft || []).length;
+    return `${head('stitchpath', 'Stitch path', n ? `${n} point${n === 1 ? '' : 's'} so far` : 'Click the first point')}
+      <div class="tip">${icon('info')}<div>Click to place points; each click carries the line on from the last one. Points snap to holes, corners and the grid, and Shift gives 15° steps. Click the first point to close it into a loop. It never cuts the leather: it only carries holes or a stitch line.</div></div>
+      <div class="row"><button class="primary" id="finishPath" ${n > 1 ? '' : 'disabled'}>${icon('check')} Finished</button><button id="undoPathPoint" ${n ? '' : 'disabled'}>Remove last point</button></div>
+      <button class="ghost" data-tool-start="select" style="margin-top:8px">Cancel</button>`;
+  }
+
+  function renderPathInspector() {
+    const pth = pathById(selected('path')[0]);
+    const n = pth.points.length;
+    const legs = [];
+    for (let k = 0; k + 1 < n; k++) legs.push(G.dist(pth.points[k], pth.points[k + 1]));
+    if (pth.closed) legs.push(G.dist(pth.points[n - 1], pth.points[0]));
+    const total = legs.reduce((a, b) => a + b, 0);
+    const lc = curLay().paths.find((x) => x.src === pth.id);
+    const holes = lc ? lc.holes.length : 0;
+    return `${head('stitchpath', `Stitch path ${pathNo(pth.id)}`, `${fmt(total)} ${units()} long${pth.mode === 'holes' ? ` · ${holes} holes` : ''}`)}
+      <div class="card"><h4>Along the path</h4><div class="seg wide">${['holes', 'stitch']
+        .map((m) => `<button class="${(pth.mode || 'holes') === m ? 'on' : ''}" data-pathmode="${m}"><i class="sw ${m}"></i>${MODE_LABEL[m]}</button>`)
+        .join('')}</div>
+        <p class="note">Holes sit right on the line. Each bend gets a hole; click a bend’s dot to switch it off, or round it with Round corners.</p></div>
+      <div class="card"><h4>Legs</h4><div class="grid2">${legs
+        .map((L, k) => `<label class="fld"><span>Leg ${k + 1}</span>${numInput(`data-pathleg="${k}"`, L)}</label>`)
+        .join('')}</div>
+        <p class="note">Changing a leg moves the points after it.</p></div>
+      <div class="card"><h4>Start point</h4><div class="grid2">
+        <label class="fld"><span>X</span>${numInput('data-pathstart="x"', pth.points[0].x)}</label>
+        <label class="fld"><span>Y</span>${numInput('data-pathstart="y"', pth.points[0].y)}</label></div>
+        <p class="note">Moves the whole path.</p>
+        ${n >= 3 ? `<label class="switch" style="margin-top:8px"><span>Closed loop</span><input type="checkbox" id="pathClosed" ${pth.closed ? 'checked' : ''}></label>` : ''}</div>
+      <div class="row"><button class="small danger" id="delPath">${icon('trash')} Delete stitch path</button><button class="small ghost" data-deselect="1">Done</button></div>`;
+  }
+
   function renderOriginInspector() {
     return `${head('target', 'Origin point', 'Click a hole or a stitch line')}
-      <div class="tip">${icon('info')}<div>Click any hole, or anywhere on a stitch line. A hole stays put there and the others space out from it; on a stitch line a tick marks the spot on the print.</div></div>
+      <div class="tip">${icon('info')}<div>Click any hole, or anywhere on a stitch line, to add an origin there. A hole stays put there and the others space out from it; on a stitch line a tick marks the spot on the print. A piece can have several; each gets a letter you can rename under Stitching. Pieces that share an origin name line up on it in Assemble.</div></div>
       <button class="ghost" data-tool-start="select">Cancel</button>`;
   }
 
@@ -2220,6 +2502,8 @@
     else if (ui.tool === 'line') html = renderLineToolInspector();
     else if (ui.tool === 'round') html = renderRoundInspector();
     else if (ui.tool === 'origin') html = renderOriginInspector();
+    else if (ui.tool === 'path') html = renderPathToolInspector();
+    else if (ui.sel.type === 'path') html = renderPathInspector();
     else if (ui.sel.type === 'edge') html = renderEdgeInspector();
     else if (ui.sel.type === 'corner') html = renderCornerInspector();
     else if (ui.sel.type === 'notch') html = renderNotchInspector();
@@ -2312,6 +2596,38 @@
     }
     if (t.id === 'pieceName') {
       pc.name = t.value.trim() || pc.name;
+      return commit();
+    }
+    if (t.dataset.edgedist) {
+      const raw = t.value.trim();
+      const v = raw === '' ? null : M.parseLength(raw, units());
+      if (v !== null && (!Number.isFinite(v) || v < 0)) return bad(t);
+      selected('edge').forEach((r) => {
+        const tg = edgeTarget(r);
+        if (!tg) return;
+        if (v === null) delete tg.edgeDist;
+        else tg.edgeDist = v;
+      });
+      return commit();
+    }
+    if (t.dataset.pathleg !== undefined || t.dataset.pathstart || t.id === 'pathClosed') {
+      const pth = pathById(selected('path')[0]);
+      if (!pth) return undefined;
+      if (t.id === 'pathClosed') {
+        pth.closed = t.checked && pth.points.length >= 3;
+        return commit();
+      }
+      const v = M.parseLength(t.value, units());
+      if (!Number.isFinite(v)) return bad(t);
+      if (t.dataset.pathstart) {
+        const k = t.dataset.pathstart;
+        const d = v - pth.points[0][k];
+        pth.points = pth.points.map((q) => ({ ...q, [k]: round(q[k] + d) }));
+        M.mapOrigins(pth, (o) => ({ ...o, [k]: o[k] + d }));
+        return commit();
+      }
+      if (v <= 0) return bad(t);
+      setPathLeg(pth, Number(t.dataset.pathleg), v);
       return commit();
     }
     if (t.id === 'allCorners') {
@@ -2444,6 +2760,18 @@
       if (ln) ln.mode = t.dataset.linemode;
       return commit();
     }
+    if (t.dataset.pathmode) {
+      const pth = pathById(selected('path')[0]);
+      if (pth) pth.mode = t.dataset.pathmode;
+      return commit();
+    }
+    if (t.id === 'finishPath') return finishPath(false);
+    if (t.id === 'undoPathPoint') {
+      if (ui.pathDraft && ui.pathDraft.length) ui.pathDraft.pop();
+      renderCanvas();
+      return renderRight();
+    }
+    if (t.id === 'delPath') return deleteSelected();
     if (t.dataset.alignmany) return alignMany(t.dataset.alignmany);
     if (t.dataset.notchshape) {
       const n = notchById(selected('notch')[0]);
@@ -2655,9 +2983,9 @@
       toast('The kept lines don’t join into a closed shape.');
       return;
     }
-    const origin = pc.outline.origin;
+    const origins = M.originsOf(pc.outline);
     pc.outline = res.outline;
-    if (origin) pc.outline.origin = origin;
+    pc.outline.origins = origins;
     pc.notches = [];
     dropLinesOn('outline');
     dropLinesOn(id);
@@ -2723,12 +3051,22 @@
     bad.forEach((x) => {
       out.push(`<circle cx="${num(x.pt.x)}" cy="${num(-x.pt.y)}" r="${num(Math.max(x.item.holeRadius * 1.9, px(6)))}" fill="#e03131" fill-opacity="0.25" stroke="#e03131" stroke-width="2" vector-effect="non-scaling-stroke" pointer-events="none"><title>${esc(x.item.piece.name)}: no matching hole in ${esc(x.other.piece.name)}</title></circle>`);
     });
-    // Shared origin
-    const o = asm.shown.find((it) => it.hasOrigin);
-    if (o) {
+    // Origins, once per spot, with their names
+    const seen = [];
+    asm.shown.forEach((it) =>
+      (it.origins || []).forEach((og) => {
+        const at = seen.find((q) => G.dist(q.pt, og.pt) < 0.05);
+        if (at) {
+          if (og.name && !at.names.includes(og.name)) at.names.push(og.name);
+        } else seen.push({ pt: og.pt, names: og.name ? [og.name] : [] });
+      })
+    );
+    seen.forEach((q) => {
       const r = px(7);
-      out.push(`<g stroke="var(--zero, #ea580c)" stroke-width="2" fill="none" pointer-events="none"><circle cx="${num(o.origin.x)}" cy="${num(-o.origin.y)}" r="${num(r)}" vector-effect="non-scaling-stroke"/><path d="M${num(o.origin.x - r * 1.7)} ${num(-o.origin.y)}H${num(o.origin.x + r * 1.7)}M${num(o.origin.x)} ${num(-o.origin.y - r * 1.7)}V${num(-o.origin.y + r * 1.7)}" vector-effect="non-scaling-stroke"/></g>`);
-    }
+      out.push(`<g stroke="var(--zero, #ea580c)" stroke-width="2" fill="none" pointer-events="none"><circle cx="${num(q.pt.x)}" cy="${num(-q.pt.y)}" r="${num(r)}" vector-effect="non-scaling-stroke"/><path d="M${num(q.pt.x - r * 1.7)} ${num(-q.pt.y)}H${num(q.pt.x + r * 1.7)}M${num(q.pt.x)} ${num(-q.pt.y - r * 1.7)}V${num(-q.pt.y + r * 1.7)}" vector-effect="non-scaling-stroke"/></g>`);
+      const label = q.names.join(' / ');
+      if (label) out.push(`<text x="${num(q.pt.x + r * 1.9)}" y="${num(-q.pt.y - r * 1.2)}" font-size="${num(px(12))}" font-weight="600" fill="var(--zero, #ea580c)" pointer-events="none">${esc(label)}</text>`);
+    });
     return out.join('');
   }
 
@@ -2754,12 +3092,12 @@
           <input type="checkbox" data-asm-on="${it.piece.id}" ${it.on ? 'checked' : ''} aria-label="Show ${esc(it.piece.name)}">
           <i class="swatch" style="background:${it.color}"></i>
           <span class="name">${esc(it.piece.name)}</span>
-          ${it.hasOrigin ? '' : '<span class="muted">no origin</span>'}</div>`)
+          <span class="muted">${it.pairedWith ? `on ${esc(it.originName)} with ${esc(it.pairedWith)}` : it.hasOrigin ? `on ${esc(it.originName)}` : 'no origin'}</span></div>`)
       .join('');
     $('#leftPanel').innerHTML = `
       <div class="section-title">Stack</div>
       <div class="asm-list">${rows || '<p class="note">No pieces with an outline yet.</p>'}</div>
-      <p class="note" style="margin-top:10px">Tick the pieces to stack. They line up by their origin points; a piece without one is centred on the others.</p>`;
+      <p class="note" style="margin-top:10px">Tick the pieces to stack, bottom first. Each piece lines up on an origin whose name it shares with a piece below it; otherwise its first origin goes on the others’ first. A piece without one is centred.</p>`;
   }
 
   // Shared-hole results, one line per pair of pieces.
@@ -2793,7 +3131,7 @@
       return;
     }
     const e = asmEntry(it.piece.id);
-    $('#rightPanel').innerHTML = `${head('piece', it.piece.name, it.hasOrigin ? 'Lined up by its origin point' : 'No origin point: centred')}
+    $('#rightPanel').innerHTML = `${head('piece', it.piece.name, it.pairedWith ? `Lined up on origin ${it.originName} with ${it.pairedWith}` : it.hasOrigin ? `Lined up by origin ${it.originName}` : 'No origin point: centred')}
       <div class="card"><h4>Turn</h4><div class="row">
         <button class="small" data-asm-rot="90">↺ 90°</button><button class="small" data-asm-rot="-90">↻ 90°</button>
         <button class="small ${e.flip ? 'primary' : ''}" id="asmFlip">${e.flip ? 'Turned over' : 'Turn over'}</button></div>
@@ -3122,7 +3460,26 @@
     }
     if (e.key === 'Shift') {
       ui.shift = true;
-      if (ui.tool === 'draw') renderCanvas();
+      if (ui.tool === 'draw' || ui.tool === 'path') renderCanvas();
+    }
+    if (ui.tool === 'path') {
+      if (e.key === 'Enter') {
+        finishPath(false);
+        return;
+      }
+      if (e.key === 'Escape') {
+        ui.pathDraft = null;
+        ui.tool = 'select';
+        renderAll();
+        return;
+      }
+      if (e.key === 'Backspace') {
+        e.preventDefault();
+        if (ui.pathDraft && ui.pathDraft.length) ui.pathDraft.pop();
+        renderCanvas();
+        renderRight();
+        return;
+      }
     }
     if (ui.tool === 'draw') {
       if (e.key === 'Enter' || e.key === 'Escape') finishDraw();
@@ -3164,8 +3521,15 @@
     else if (k === 't') setTool('trim');
     else if (k === 'r') setTool('round');
     else if (k === 'o') setTool('origin');
-    else if ((k === 'delete' || k === 'backspace') && ['shape', 'notch', 'line'].includes(ui.sel.type)) deleteSelected();
-    else if ((ui.sel.type === 'edge' || ui.sel.type === 'line') && (k === 'h' || k === 's' || k === 'n')) {
+    else if (k === 'k') setTool('path');
+    else if ((k === 'delete' || k === 'backspace') && ['shape', 'notch', 'line', 'path'].includes(ui.sel.type)) deleteSelected();
+    else if (ui.sel.type === 'path' && (k === 'h' || k === 's')) {
+      selected('path').forEach((id) => {
+        const pth = pathById(id);
+        if (pth) pth.mode = k === 'h' ? 'holes' : 'stitch';
+      });
+      commit();
+    } else if ((ui.sel.type === 'edge' || ui.sel.type === 'line') && (k === 'h' || k === 's' || k === 'n')) {
       setModes(ui.sel.type === 'line' ? selected('line').map((id) => `l:${id}`) : selected('edge'), { h: 'holes', s: 'stitch', n: 'none' }[k]);
       commit();
     }
@@ -3173,7 +3537,7 @@
   document.addEventListener('keyup', (e) => {
     if (e.key === 'Shift') {
       ui.shift = false;
-      if (ui.tool === 'draw') renderCanvas();
+      if (ui.tool === 'draw' || ui.tool === 'path') renderCanvas();
     }
   });
   window.addEventListener('resize', renderCanvas);

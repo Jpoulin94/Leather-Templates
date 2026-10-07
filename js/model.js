@@ -48,7 +48,9 @@
   // (`cutouts`). A shape's `op` says how it is used: 'hole' (a cutout inside
   // the piece) or 'cut' / 'merge' / 'overlap' with the outline. Notches and
   // combined shapes stay editable; js/resolve.js builds the final result.
-  // The outline and each shape may carry an `origin` {x, y}.
+  // The outline, each shape and each stitch path may carry origin points
+  // (`origins`: [{ id, name, x, y }]). Stitch paths (`paths`) are lines of
+  // holes or stitching drawn on the piece that cut nothing.
   function newPiece(name, outline) {
     return {
       id: uid(),
@@ -57,7 +59,48 @@
       notches: [],
       cutouts: [],
       lines: [],
+      paths: [],
     };
+  }
+
+  // A stitch path through `points`; corners[k] holds the bend at point k.
+  function newPath(points, closed = false, mode = 'holes') {
+    return { id: uid(), points: points.map((p) => ({ x: p.x, y: p.y })), closed, mode, corners: {}, origins: [] };
+  }
+
+  // Origin points of a contour or path (older files kept a single `origin`).
+  function originsOf(c) {
+    if (!c) return [];
+    if (Array.isArray(c.origins)) return c.origins;
+    return c.origin ? [{ id: 'origin', name: 'A', x: c.origin.x, y: c.origin.y }] : [];
+  }
+
+  // Every origin of a piece with the thing that holds it.
+  function pieceOrigins(pc) {
+    const out = [];
+    const add = (owner, kind, c) => originsOf(c).forEach((o) => out.push({ o, owner, kind, holder: c }));
+    add('outline', 'outline', pc.outline);
+    (pc.cutouts || []).forEach((c) => add(c.id, 'shape', c));
+    (pc.paths || []).forEach((p) => add(p.id, 'path', p));
+    return out;
+  }
+
+  // The next free origin name in a piece: A, B, C… then A2, B2…
+  function nextOriginName(pc) {
+    const used = new Set(pieceOrigins(pc).map((x) => String(x.o.name || '').toUpperCase()));
+    for (let round = 1; ; round++) {
+      for (let i = 0; i < 26; i++) {
+        const name = String.fromCharCode(65 + i) + (round > 1 ? round : '');
+        if (!used.has(name)) return name;
+      }
+    }
+  }
+
+  // Move every origin of a contour or path with fn(point).
+  function mapOrigins(c, fn) {
+    if (!c) return;
+    c.origins = originsOf(c).map((o) => ({ ...o, ...fn(o) }));
+    delete c.origin;
   }
 
   // A cut line across the outline (target 'outline') or a shape (its id).
@@ -127,19 +170,40 @@
       });
       const outline = fixContour(pc.outline);
       // Version 1 kept a "zero point" as an edge and offset.
-      if (pc.zero && pc.zero.enabled && !outline.origin && LT.geom) {
+      if (pc.zero && pc.zero.enabled && !outline.origin && !(outline.origins || []).length && LT.geom) {
         const pt = LT.geom.pointOnEdge(outline, pc.zero.edge, pc.zero.offset);
         if (pt) outline.origin = { x: pt.x, y: pt.y };
       }
+      // One origin each became a list of named origins.
+      const names = new Set();
+      const fixOrigins = (c) => {
+        c.origins = originsOf(c).map((o) => ({ ...o, id: o.id && o.id !== 'origin' ? o.id : uid() }));
+        delete c.origin;
+        return c;
+      };
       const out = {
         ...newPiece(pc.name || `Piece ${i + 1}`),
         ...pc,
         id: pc.id || uid(),
         outline,
         notches: (pc.notches || []).map((n) => ({ ...newNotch(0, 20, 10), ...n, corners: { L: { fillet: 0, corner: true }, R: { fillet: 0, corner: true }, ...(n.corners || {}) } })),
-        cutouts: (pc.cutouts || []).map((c) => ({ id: uid(), op: 'hole', joins: {}, ...fixContour(c) })),
+        cutouts: (pc.cutouts || []).map((c) => fixOrigins({ id: uid(), op: 'hole', joins: {}, ...fixContour(c) })),
         lines: (pc.lines || []).filter((l) => l && l.a && l.b).map((l) => ({ ...newLine(l.a, l.b), ...l, corners: { a: { fillet: 0, corner: true }, b: { fillet: 0, corner: true }, ...(l.corners || {}) } })),
+        paths: (pc.paths || []).filter((p) => p && Array.isArray(p.points) && p.points.length > 1).map((p) => fixOrigins({ ...newPath(p.points), ...p, corners: { ...(p.corners || {}) } })),
       };
+      fixOrigins(out.outline);
+      // Give unnamed or clashing origins their own letters.
+      pieceOrigins(out).forEach(({ o }) => {
+        const key = String(o.name || '').toUpperCase();
+        if (!key || names.has(key)) o.name = '';
+        else names.add(key);
+      });
+      pieceOrigins(out).forEach(({ o }) => {
+        if (!o.name) {
+          o.name = nextOriginName(out);
+          names.add(o.name);
+        }
+      });
       // Stitching sizes are set once per project now.
       delete out.zero;
       delete out.customSettings;
@@ -209,6 +273,11 @@
     newShape,
     newNotch,
     newLine,
+    newPath,
+    originsOf,
+    pieceOrigins,
+    nextOriginName,
+    mapOrigins,
     slot,
     newProject,
     normalizeProject,

@@ -19,13 +19,21 @@
     return { on: true, dx: 0, dy: 0, rot: 0, flip: false, ...(a[pc.id] || {}) };
   }
 
+  // Every origin of a laid-out piece: { name, pt }.
+  function originsOf(lay) {
+    return LT.layout.allOf(lay).flatMap((c) => (c.origins || []).map((o) => ({ name: o.name || '', pt: o.pt })));
+  }
+
+  const same = (a, b) => String(a || '').trim().toUpperCase() === String(b || '').trim().toUpperCase() && String(a || '').trim() !== '';
+
   // The point of a laid-out piece that sits at the assembly's origin: its
-  // origin point if it has one, otherwise the middle of the piece.
+  // first origin point if it has one, otherwise the middle of the piece.
   function anchorOf(lay) {
-    if (lay.outline.origin) return { pt: lay.outline.origin.pt, hasOrigin: true };
+    const os = originsOf(lay);
+    if (os.length) return { pt: os[0].pt, name: os[0].name, hasOrigin: true };
     const b = LT.layout.pieceBBox(lay);
-    if (!b) return { pt: { x: 0, y: 0 }, hasOrigin: false };
-    return { pt: { x: (b.minX + b.maxX) / 2, y: (b.minY + b.maxY) / 2 }, hasOrigin: false };
+    if (!b) return { pt: { x: 0, y: 0 }, name: '', hasOrigin: false };
+    return { pt: { x: (b.minX + b.maxX) / 2, y: (b.minY + b.maxY) / 2 }, name: '', hasOrigin: false };
   }
 
   // Map from piece coordinates to assembly coordinates.
@@ -62,24 +70,48 @@
     return n ? n.d : Infinity;
   }
 
-  // Lay out every piece that is switched on, in assembly coordinates.
+  // Lay out every piece that is switched on, in assembly coordinates. Each
+  // piece lines up on an origin whose name it shares with a piece below it
+  // in the stack (the nearest one); otherwise its first origin sits at the
+  // assembly's origin.
   function buildAssembly(project) {
     const items = [];
+    const placed = []; // shown pieces so far: { name, origins: [{ name, pt }] }
     project.pieces.forEach((pc, i) => {
       const e = entryFor(project, pc);
       if (!pc.outline.segments.length) return;
       const lay = LT.layout.layoutPiece(project, pc);
-      const anchor = anchorOf(lay);
-      const tf = transform(anchor.pt, e);
-      const all = [lay.outline, ...lay.cutouts];
+      const own = originsOf(lay);
+      let anchor = anchorOf(lay);
+      let target = { x: 0, y: 0 };
+      let pairedWith = null;
+      for (let k = placed.length - 1; k >= 0 && !pairedWith; k--) {
+        for (const o of own) {
+          const hit = placed[k].origins.find((q) => same(q.name, o.name));
+          if (hit) {
+            anchor = { pt: o.pt, name: o.name, hasOrigin: true };
+            target = hit.pt;
+            pairedWith = placed[k].name;
+            break;
+          }
+        }
+      }
+      const tf = transform(anchor.pt, { ...e, dx: (Number(e.dx) || 0) + target.x, dy: (Number(e.dy) || 0) + target.y });
+      const all = LT.layout.allOf(lay);
+      const on = e.on !== false;
+      const origins = own.map((o) => ({ name: o.name, pt: tf.point(o.pt) }));
+      if (on) placed.push({ name: pc.name, origins });
       items.push({
         piece: pc,
         index: i,
-        on: e.on !== false,
+        on,
         entry: e,
         color: COLORS[i % COLORS.length],
         hasOrigin: anchor.hasOrigin,
+        originName: anchor.name,
+        pairedWith,
         origin: tf.point(anchor.pt),
+        origins,
         outline: lay.outline.prims.map(tf.prim),
         cutouts: lay.cutouts.map((c) => c.prims.map(tf.prim)),
         stitch: all.flatMap((c) => c.stitch.map((st) => ({ prims: st.prims.map(tf.prim), closed: st.closed }))),
@@ -123,5 +155,5 @@
     return { pairs, bad };
   }
 
-  LT.assembly = { COLORS, entryFor, anchorOf, transform, buildAssembly, checkHoles };
+  LT.assembly = { COLORS, entryFor, anchorOf, originsOf, transform, buildAssembly, checkHoles };
 })(typeof window !== 'undefined' ? window : globalThis);

@@ -159,22 +159,22 @@
           cv.push(`${cv.mm(MARGIN.left, MARGIN.bottom)} ${f(cw * PT)} ${f(ch * PT)} re W n`);
           cv.gray(0);
           cv.dash(0);
-          [lay.outline, ...lay.cutouts].forEach((ct) => {
+          LT.layout.allOf(lay).forEach((ct) => {
             cv.lineWidth(0.3);
-            cv.prims(ct.prims, map, true);
+            if (ct.kind !== 'path') cv.prims(ct.prims, map, true);
             cv.lineWidth(0.2);
             cv.dash(1.5, 1);
             ct.stitch.forEach((s) => cv.prims(s.prims, map, s.closed));
             cv.dash(0);
-            if (ct.origin) {
-              // Origin: a tick across the stitch line, or a ring round the hole.
+            (ct.origins || []).forEach((o) => {
+              // Origin: a tick across the stitch line, or a ring round the
+              // hole, with its name.
               cv.lineWidth(0.3);
-              if (ct.origin.kind === 'stitch') cv.prims([LT.layout.originTick(ct.origin)], map, false);
-              else {
-                const t = map(ct.origin.pt);
-                cv.circle(t.x, t.y, lay.holeRadius + 1);
-              }
-            }
+              const t = map(o.pt);
+              if (o.kind === 'stitch') cv.prims([LT.layout.originTick(o)], map, false);
+              else cv.circle(t.x, t.y, lay.holeRadius + 1);
+              if (o.name) cv.text(t.x + lay.holeRadius + 1.5, t.y + 1, 7, o.name);
+            });
             ct.holes.forEach((h) => {
               const t = map(h);
               cv.lineWidth(0.15);

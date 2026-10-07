@@ -18,14 +18,23 @@ test('rectangle: a hole on every corner, even spacing on each side', () => {
   const r = layout.layoutContour(c, settings, { isOutline: true });
   // Hole centres sit 3 + 1 = 4 mm in from the edges.
   for (const [x, y] of [[4, 4], [96, 4], [96, 46], [4, 46]]) assert.ok(hasPoint(r.holes, x, y), `corner ${x},${y}`);
-  // 92 mm side / 4 = 23 gaps exactly; 42 mm side -> 10.5 -> 10 or 11 gaps.
+  // 92 mm side / 4 = 23 gaps exactly.
   const bottom = r.holes.filter((p) => near(p.y, 4)).sort((a, b) => a.x - b.x);
   assert.equal(bottom.length, 24);
   gaps(bottom).forEach((g) => assert.ok(near(g, 4)));
-  const left = r.holes.filter((p) => near(p.x, 4)).sort((a, b) => a.y - b.y);
-  const g = gaps(left);
-  g.forEach((x) => assert.ok(near(x, g[0])));
-  assert.ok(near(left[left.length - 1].y, 46));
+  // 42 mm side: spacing stays exactly 4 and the 2 mm left over is one short
+  // gap at the far corner, flagged.
+  const right = r.holes.filter((p) => near(p.x, 96)).sort((a, b) => a.y - b.y);
+  const g = gaps(right);
+  g.slice(0, -1).forEach((x) => assert.ok(near(x, 4)));
+  assert.ok(near(g[g.length - 1], 2));
+  const uneven = r.sections.filter((s) => s.uneven);
+  assert.equal(uneven.length, 2);
+  uneven.forEach((s) => {
+    assert.ok(near(s.length, 42));
+    assert.ok(near(s.gap, 2));
+    assert.equal(s.oddKind, 'corner');
+  });
   // No duplicates.
   const keys = new Set(r.holes.map((p) => `${p.x.toFixed(4)},${p.y.toFixed(4)}`));
   assert.equal(keys.size, r.holes.length);
@@ -46,18 +55,19 @@ test('clockwise rectangle still puts holes inside', () => {
 });
 
 test('deselected corner gets no forced hole', () => {
-  const c = model.rectangle(100, 50, 0, 0, 0, 'holes');
-  c.segments[1].corner = false; // vertex at (100, 0)
+  const c = model.rectangle(99, 50, 0, 0, 0, 'holes');
+  c.segments[1].corner = false; // vertex at (99, 0)
   const r = layout.layoutContour(c, settings, { isOutline: true });
-  assert.ok(!hasPoint(r.holes, 96, 4, 0.01));
-  // The section from (4,4) to (96,46) round the corner is spread evenly.
+  assert.ok(!hasPoint(r.holes, 95, 4, 0.01));
+  // The section from (4,4) to (95,46) runs round the corner at exactly
+  // 4 mm: 133 mm leaves a 1 mm gap at the far corner.
   assert.ok(hasPoint(r.holes, 4, 4));
-  assert.ok(hasPoint(r.holes, 96, 46));
-  const L = 92 + 42;
-  const n = Math.round(L / 4);
+  assert.ok(hasPoint(r.holes, 95, 46));
+  const L = 91 + 42;
   const sec = r.sections.find((s) => near(s.length, L));
   assert.ok(sec, 'merged section');
-  assert.ok(near(sec.actual, L / n));
+  assert.ok(sec.uneven);
+  assert.ok(near(sec.gap, 1));
 });
 
 test('only selected edges get holes; open ends keep the exact spacing', () => {
@@ -125,7 +135,10 @@ test('rounded corners: holes follow the curve, no forced corner hole', () => {
   assert.equal(r.holePaths.length, 1);
   const L = 2 * (92 - 12) + 2 * (42 - 12) + 2 * Math.PI * 6;
   assert.ok(near(G.pathLength(r.holePaths[0].prims), L, 1e-6));
-  assert.equal(r.holes.length, Math.round(L / 4));
+  // Exactly 4 mm all the way round, with whatever is left over as one
+  // short gap.
+  assert.equal(r.holes.length, Math.ceil(L / 4));
+  assert.equal(r.sections.filter((s) => s.uneven).length, L % 4 > 0.01 ? 1 : 0);
   // Corner region is cut off: nothing at the raw offset corner.
   assert.ok(!hasPoint(r.holes, 4, 4, 0.5));
 });
