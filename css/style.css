@@ -1076,6 +1076,43 @@ details.check > summary {
 details.check > summary::marker {
   color: var(--zero);
 }
+.clash {
+  font-size: 12px;
+  line-height: 1.45;
+  background: color-mix(in srgb, var(--zero) 8%, transparent);
+  border-left: 3px solid var(--zero);
+  border-radius: 6px;
+  padding: 7px 9px;
+  margin-top: 8px;
+}
+.clash.on {
+  background: color-mix(in srgb, var(--zero) 16%, transparent);
+}
+.clash p {
+  margin: 0 0 6px;
+}
+.clash-h {
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+.clash-fixes,
+.clash-manual {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.clash-fixes {
+  grid-template-columns: 1fr;
+}
+.clash-manual {
+  grid-template-columns: minmax(0, 1.2fr) 1fr 1fr;
+  margin-bottom: 0;
+}
+.clash-manual button {
+  padding-left: 4px;
+  padding-right: 4px;
+}
 button.run {
   display: block;
   width: 100%;

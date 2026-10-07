@@ -5,11 +5,17 @@
 // outline, outward for a cutout. Holes are placed on runs of consecutive
 // edges set to 'holes'. Within a run, "anchors" always get a hole:
 //   - sharp corners whose corner hole is switched on,
-//   - the origin point, when it sits on the run,
-//   - run ends, when the corner hole at that end is switched on.
+//   - the origin point, when it sits on the run.
 // Between anchors the spacing is stretched or shrunk slightly so the holes
-// divide the distance evenly. An end without an anchor is inset by half a
-// spacing.
+// divide the distance evenly. Where a run ends at an edge without holes
+// (an open end) that edge is ignored: holes carry on at exactly the set
+// spacing from the nearest anchor, right up to that edge, as long as each
+// leaves at least MARGIN of leather before it. A run with no anchors
+// starts with a hole at its start.
+//
+// If the next hole of the pattern would touch or cross that edge, the
+// edge would cut through it on a piece stacked with this one, so the end
+// is flagged with the nearest edge positions that clear it (`openEnds`).
 (function (root) {
   'use strict';
   const LT = (root.LT = root.LT || {});
@@ -64,7 +70,9 @@
     return { pos, actual, length };
   }
 
-  function layoutRun(run, contour, spacing, originS) {
+  // reach: how far holes may run on past each open end ({ start, end }, mm).
+  function layoutRun(run, contour, spacing, originS, reach) {
+    reach = reach || { start: 0, end: 0 };
     const prims = run.prims;
     const cum = [0];
     prims.forEach((p) => cum.push(cum[cum.length - 1] + G.primLength(p)));
@@ -83,6 +91,8 @@
     const uniq = anchors.filter((a, i) => i === 0 || a - anchors[i - 1] > 1e-6);
 
     const sections = [];
+    const fixed = { start: true, end: true };
+    const pinned = { start: 0, end: L }; // pattern anchor nearest each end
     let positions = [];
     if (run.closed) {
       if (!uniq.length) uniq.push(0);
@@ -94,19 +104,137 @@
       });
       positions = positions.map((s) => ((s % L) + L) % L);
     } else {
-      const inner = uniq.filter((a) => a > 1e-6 && a < L - 1e-6);
-      const bps = [0, ...inner, L];
-      const flags = [corner(prims[0].vStart), ...inner.map(() => true), corner(prims[prims.length - 1].vEnd)];
-      for (let i = 0; i + 1 < bps.length; i++) {
-        const r = distribute(bps[i], bps[i + 1], flags[i], flags[i + 1], spacing);
-        sections.push({ ...r, from: bps[i], to: bps[i + 1], path: prims, closed: false });
+      // Open ends: exact spacing outward from the nearest anchor.
+      const inner = uniq.filter((a) => a > -1e-6 && a < L + 1e-6);
+      // No anchors: the pattern starts at the run's start (inset by half a
+      // spacing when that corner's hole is switched off).
+      if (!inner.length) inner.push(Math.min(L, corner(prims[0].vStart) ? 0 : spacing / 2));
+      // An end where the pattern is pinned is never checked for clearance.
+      fixed.start = !uniq.length || inner[0] < 1e-6;
+      fixed.end = inner[inner.length - 1] > L - 1e-6;
+      pinned.start = inner[0];
+      pinned.end = inner[inner.length - 1];
+      const first = inner[0];
+      const last = inner[inner.length - 1];
+      const exact = (from, to, dir) => {
+        const pos = [];
+        for (let s = from; dir > 0 ? s <= to + 1e-6 : s >= to - 1e-6; s += dir * spacing) pos.push(s);
+        return pos;
+      };
+      if (!fixed.start) {
+        positions = positions.concat(exact(first, -reach.start, -1));
+        if (first > 1e-6) sections.push({ pos: [], actual: spacing, length: first, from: 0, to: first, path: prims, closed: false });
+      }
+      for (let i = 0; i + 1 < inner.length; i++) {
+        const r = distribute(inner[i], inner[i + 1], true, true, spacing);
+        sections.push({ ...r, from: inner[i], to: inner[i + 1], path: prims, closed: false });
         positions = positions.concat(r.pos);
       }
+      positions = positions.concat(exact(last, fixed.end ? L : L + reach.end, 1));
+      if (L - last > 1e-6) sections.push({ pos: [], actual: spacing, length: L - last, from: last, to: L, path: prims, closed: false });
     }
     positions.sort((a, b) => a - b);
     const dedup = positions.filter((s, i) => i === 0 || s - positions[i - 1] > 1e-6);
     if (run.closed && dedup.length > 1 && L - dedup[dedup.length - 1] + dedup[0] < 1e-6) dedup.pop();
-    return { points: dedup.map((s) => G.pathPointAt(prims, s)), sections, path: prims };
+    return { points: dedup.map((s) => pointAt(prims, L, s)), positions: dedup, sections, path: prims, length: L, fixed, pinned };
+  }
+
+  // A point along a run, carrying straight on past either end.
+  function pointAt(prims, L, s) {
+    if (s < 0) return G.add(G.primStart(prims[0]), G.mul(G.primStartTangent(prims[0]), s));
+    if (s > L) return G.add(G.primEnd(prims[prims.length - 1]), G.mul(G.primEndTangent(prims[prims.length - 1]), s - L));
+    return G.pathPointAt(prims, s);
+  }
+
+  const segOf = (contour, idx) => (idx < contour.segments.length ? contour.segments[idx] : contour.closing) || {};
+
+  const MARGIN = 0.5; // least leather between a hole and an edge without holes
+
+  // Where the line of holes, carried on past each end of an open run, meets
+  // the edge without holes on the other side of the corner.
+  //   t     distance from the run's end to that edge
+  //   g     how far a hole's centre must stay from the crossing to clear it
+  function endInfo(run, rawPrims, holeRadius) {
+    const out = { start: null, end: null };
+    if (run.closed) return out;
+    const P = run.prims;
+    ['end', 'start'].forEach((which) => {
+      const atEnd = which === 'end';
+      const edgePrim = atEnd ? [...P].reverse().find((p) => p.fillet === undefined) : P.find((p) => p.fillet === undefined);
+      if (!edgePrim) return;
+      const E = atEnd ? G.primEnd(P[P.length - 1]) : G.primStart(P[0]);
+      const u = G.norm(atEnd ? G.primEndTangent(P[P.length - 1]) : G.mul(G.primStartTangent(P[0]), -1));
+      const cutRaw = atEnd
+        ? rawPrims.find((p) => p.fillet === undefined && p.edge === P[P.length - 1].vEnd)
+        : rawPrims.find((p) => p.fillet === undefined && p.vEnd === P[0].vStart);
+      const holedRaw = rawPrims.find((p) => p.fillet === undefined && p.edge === edgePrim.edge);
+      if (!cutRaw || !holedRaw || cutRaw === holedRaw) return;
+      const ray = { type: 'line', a: E, b: G.add(E, u) };
+      let t = null;
+      let at = null;
+      G.intersections(ray, cutRaw).forEach((pt) => {
+        const tt = G.dot(G.sub(pt, E), u);
+        if (tt > -1e-6 && (t === null || tt < t)) {
+          t = tt;
+          at = pt;
+        }
+      });
+      if (t === null) return;
+      const tan = cutRaw.type === 'line' ? G.norm(G.sub(cutRaw.b, cutRaw.a)) : G.norm({ x: -(at.y - cutRaw.c.y), y: at.x - cutRaw.c.x });
+      const sin = Math.abs(G.cross(u, tan));
+      if (sin < 0.15) return; // edge runs almost along the holes: leave it
+      const g = holeRadius / sin;
+      out[which] = { E, u, t, g, at, cutRaw, holedRaw, reach: Math.max(0, t - g - MARGIN) };
+    });
+    return out;
+  }
+
+  // For each open end that isn't pinned: whether the next hole of the
+  // pattern would be cut by the edge without holes, and where that edge
+  // could go instead. Distances run from the pattern's anchor nearest
+  // that end (a corner hole, the origin, or the run's start), which stays
+  // put when the edge moves:
+  //   cross    where the edge crosses the line of holes
+  //   targets  crossings that clear every hole, nearest first
+  function openEnds(run, laid, info, contour, spacing) {
+    if (run.closed || !laid.positions.length) return [];
+    const L = laid.length;
+    const out = [];
+    ['end', 'start'].forEach((which) => {
+      const e = info[which];
+      if (!e || laid.fixed[which]) return;
+      const atEnd = which === 'end';
+      const pos = laid.positions;
+      const base = laid.pinned[which];
+      const last = atEnd ? pos[pos.length - 1] - base : base - pos[0];
+      const next = last + spacing;
+      const cross = atEnd ? L + e.t - base : base + e.t;
+      const beyond = atEnd ? L - base : base; // from the anchor to the run's end
+      const g = e.g;
+      const clear = g + MARGIN + 0.01; // a hair more, so rounding stays clear
+      const targets = [next + clear];
+      if (next - clear >= last + clear) targets.push(next - clear);
+      targets.sort((a, b) => Math.abs(a - cross) - Math.abs(b - cross));
+      const hu = G.norm(atEnd ? G.primEndTangent(e.holedRaw) : G.mul(G.primStartTangent(e.holedRaw), -1));
+      const cutRef = segOf(contour, e.cutRaw.edge).ref || null;
+      const holedRef = segOf(contour, e.holedRaw.edge).ref || null;
+      out.push({
+        which,
+        key: `${cutRef || `e${e.cutRaw.edge}`}|${holedRef || `e${e.holedRaw.edge}`}`,
+        cutRef,
+        holedRef,
+        cutPrim: e.cutRaw,
+        holedPrim: e.holedRaw,
+        corner: atEnd ? G.primStart(e.cutRaw) : G.primEnd(e.cutRaw),
+        dir: hu,
+        cross,
+        crossPt: e.at,
+        holePt: G.add(e.E, G.mul(e.u, next - beyond)),
+        conflict: next < cross + g + MARGIN - 1e-6, // touching counts
+        targets,
+      });
+    });
+    return out;
   }
 
   // settings: { holeDiameter, spacing, edgeDistance, stitchOffset }
@@ -116,7 +244,7 @@
   // with a short tick across the line.
   function layoutContour(contour, settings, opts) {
     const prims = G.buildPrimitives(contour);
-    const res = { contour, prims, holes: [], holePaths: [], stitch: [], sections: [], origin: null };
+    const res = { contour, prims, holes: [], holePaths: [], stitch: [], sections: [], origin: null, openEnds: [] };
     if (!prims.length) return res;
     const ccw = G.signedArea(prims) > 0;
     const side = opts.isOutline === ccw ? 1 : -1; // +1: material is on the left
@@ -142,9 +270,12 @@
 
     holeRuns.forEach((run, i) => {
       const s = best && best.kind === 'hole' && best.i === i ? best.s : null;
-      const r = layoutRun(run, contour, settings.spacing, s);
+      const info = endInfo(run, prims, settings.holeDiameter / 2);
+      const reach = { start: info.start ? info.start.reach : 0, end: info.end ? info.end.reach : 0 };
+      const r = layoutRun(run, contour, settings.spacing, s, reach);
       res.holes = res.holes.concat(r.points);
       res.holePaths.push({ prims: r.path, closed: run.closed });
+      res.openEnds = res.openEnds.concat(openEnds(run, r, info, contour, settings.spacing));
       r.sections.forEach((sec) => res.sections.push({ ...sec, requested: settings.spacing }));
     });
 
