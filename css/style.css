@@ -1351,3 +1351,6 @@ body.assemble .legend {
     flex: 1;
   }
 }
+
+.note-row { margin: 6px 0; }
+.note-row .note { margin: 0 0 6px; }

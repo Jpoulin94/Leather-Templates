@@ -3,11 +3,12 @@
 // Holes sit on a path offset from the leather edge by
 // (edge distance + hole radius), toward the material: inward for an
 // outline, outward for a cutout. Holes are placed on runs of consecutive
-// edges set to 'holes'. Within a run, "anchors" always get a hole:
+// edges set to 'holes'. Within a run, "anchors" pin the pattern:
 //   - sharp corners whose corner hole is switched on,
-//   - the origin point, when it sits on the run.
-// Between anchors the spacing is stretched or shrunk slightly so the holes
-// divide the distance evenly. Where a run ends at an edge without holes
+//   - the origin points that sit on the run.
+// Between anchors the holes are exactly the set spacing apart, always. If
+// the distance isn't a whole number of spaces, the corner hole at the far
+// end is left out (see `fit`). Where a run ends at an edge without holes
 // (an open end) that edge is ignored: holes carry on at exactly the set
 // spacing from the nearest anchor, right up to that edge, as long as each
 // leaves at least MARGIN of leather before it. A run with no anchors
@@ -56,7 +57,11 @@
   // Holes at exactly `spacing` between two anchors that both get a hole.
   // The pattern starts from an origin if one end is an origin, otherwise
   // from the first anchor; whatever is left over shows up as one short
-  // gap at the other end (`gap`, with `uneven` set).
+  // gap at the other end. Spacing never changes, so where that end is a
+  // corner hole (or a stitch path's end or bend) the hole is left out
+  // instead (`dropped`): the stitching turns just before it. Only between
+  // two origins, or round a closed run with no corners, does a short gap
+  // remain (`uneven`).
   function fit(A, B, spacing) {
     const length = B.s - A.s;
     const back = B.kind === 'origin' && A.kind !== 'origin';
@@ -67,12 +72,16 @@
     if (rem > TOL) pos.push(back ? A.s : B.s);
     if (rem <= TOL) rem = 0;
     const odd = back ? A : B;
+    const short = rem > TOL && rem < spacing - TOL;
+    const drop = odd.kind === 'corner' || odd.kind === 'end';
     return {
       pos,
       length,
       actual: spacing,
       gap: rem,
-      uneven: rem > TOL && rem < spacing - TOL,
+      uneven: short && !drop,
+      dropped: short && drop,
+      oddS: odd.s,
       oddEnd: back ? 'from' : 'to',
       oddKind: odd.kind,
       oddVertex: odd.kind === 'corner' || odd.kind === 'end' ? odd.v : null,
@@ -156,10 +165,17 @@
       positions = positions.concat(exact(last, fixed.end ? L : L + reach.end, 1));
       if (L - last > 1e-6) sections.push({ pos: [], actual: spacing, gap: 0, uneven: false, length: L - last, from: last, to: L, path: prims, closed: false });
     }
+    // Corner holes left out to keep the spacing: drop them, and note where
+    // they were.
+    const goneAt = [...new Set(sections.filter((x) => x.dropped).map((x) => x.oddS))];
+    const gone = goneAt.map((g) => (run.closed ? ((g % L) + L) % L : g));
+    const near = (x, g) => Math.abs(x - g) < 1e-6 || (run.closed && Math.abs(Math.abs(x - g) - L) < 1e-6);
+    positions = positions.filter((x) => !gone.some((g) => near(x, g)));
     positions.sort((a, b) => a - b);
     const dedup = positions.filter((x, i) => i === 0 || x - positions[i - 1] > 1e-6);
     if (run.closed && dedup.length > 1 && L - dedup[dedup.length - 1] + dedup[0] < 1e-6) dedup.pop();
-    return { points: dedup.map((x) => pointAt(prims, L, x)), positions: dedup, sections, path: prims, length: L, fixed, pinned };
+    const removed = gone.map((g) => ({ pt: pointAt(prims, L, g) }));
+    return { points: dedup.map((x) => pointAt(prims, L, x)), positions: dedup, sections, path: prims, length: L, fixed, pinned, removed };
   }
 
   // A point along a run, carrying straight on past either end.
@@ -261,21 +277,20 @@
   }
 
   // settings: { holeDiameter, spacing, edgeDistance, stitchOffset }
-  // opts: { isOutline, origin: {x, y} | null }
+  // opts: { isOutline, origins: [{x, y, id, name}], path }
   // The origin snaps to the nearest hole run or stitch line of the contour.
   // On a hole run a hole always lands on it; on a stitch line it is marked
   // with a short tick across the line.
   function layoutContour(contour, settings, opts) {
     const prims = G.buildPrimitives(contour);
-    const res = { contour, prims, holes: [], holePaths: [], stitch: [], sections: [], origin: null, origins: [], openEnds: [] };
+    const res = { contour, prims, holes: [], holePaths: [], stitch: [], sections: [], origin: null, origins: [], openEnds: [], removed: [] };
     if (!prims.length) return res;
     const ccw = G.signedArea(prims) > 0;
     const side = opts.isOutline === ccw ? 1 : -1; // +1: material is on the left
 
     let holeRuns = [];
     if (prims.some((p) => p.mode === 'holes') && settings.spacing > 0) {
-      // Each edge can have its own distance from the edge to its holes.
-      const d = opts.path ? 0 : (p) => side * ((p.edgeDist ?? settings.edgeDistance) + settings.holeDiameter / 2);
+      const d = opts.path ? 0 : side * (settings.edgeDistance + settings.holeDiameter / 2);
       holeRuns = findRuns(G.offsetPrims(prims, d), 'holes');
     }
     if (prims.some((p) => p.mode === 'stitch')) {
@@ -303,6 +318,7 @@
       const reach = { start: info.start ? info.start.reach : 0, end: info.end ? info.end.reach : 0 };
       const r = layoutRun(run, contour, settings.spacing, os, reach, { anchorEnds: !!opts.path });
       res.holes = res.holes.concat(r.points);
+      res.removed = res.removed.concat(r.removed);
       res.holePaths.push({ prims: r.path, closed: run.closed });
       res.openEnds = res.openEnds.concat(openEnds(run, r, info, contour, settings.spacing));
       r.sections.forEach((sec) => res.sections.push({ ...sec, requested: settings.spacing }));
@@ -346,7 +362,7 @@
     const last = corner(n - 1);
     const closing = path.closed
       ? { mode: path.mode || 'holes', fillet: Number(last.fillet) || 0, corner: last.corner !== false, ref: `p:${path.id}:${n - 1}`, vref: `p:${path.id}:${n - 1}` }
-      : { mode: 'none', fillet: 0, corner: true };
+      : { mode: 'none', fillet: 0, corner: true, vref: `p:${path.id}:${n - 1}` };
     return { start: n ? { x: pts[0].x, y: pts[0].y } : null, segments, closing };
   }
 

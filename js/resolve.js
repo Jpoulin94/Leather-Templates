@@ -27,7 +27,7 @@
     return G.buildEdges(contour).map((e) => {
       const vp = G.vertexProps(contour, e.edge);
       const ref = `${prefix}${e.edge}`;
-      return { ...e, ref, vref: ref, mode: vp.mode, edgeDist: vp.edgeDist, fillet: vp.fillet, corner: vp.corner };
+      return { ...e, ref, vref: ref, mode: vp.mode, fillet: vp.fillet, corner: vp.corner };
     });
   }
 
@@ -120,7 +120,7 @@
         const P1 = at(c + w2);
         const vL = notchVertex(n, 'L');
         if (c - w2 - pos > 1e-6) {
-          out.push({ type: 'line', a: at(pos), b: P0, ref: e.ref, mode: e.mode, edgeDist: e.edgeDist, ...startV });
+          out.push({ type: 'line', a: at(pos), b: P0, ref: e.ref, mode: e.mode, ...startV });
           startV = vL;
         } else if (pos === 0) {
           // The notch starts right at the edge's corner: that corner wins.
@@ -133,14 +133,14 @@
           // A square notch has two real corners at the bottom; a round
           // notch's inner joins are smooth.
           const v = k === 0 ? startV : square ? notchVertex(n, k === 1 ? 'BL' : 'BR') : { vref: `n:${n.id}:x`, fillet: 0, corner: true };
-          out.push({ ...p, ref: `n:${n.id}`, mode: e.mode, edgeDist: e.edgeDist, ...v });
+          out.push({ ...p, ref: `n:${n.id}`, mode: e.mode, ...v });
         });
         const last = out[out.length - 1];
         if (last.type === 'line') last.b = P1;
         pos = c + w2;
         startV = notchVertex(n, 'R');
       });
-      if (L - pos > 1e-6) out.push({ type: 'line', a: at(pos), b: e.b, ref: e.ref, mode: e.mode, edgeDist: e.edgeDist, ...startV });
+      if (L - pos > 1e-6) out.push({ type: 'line', a: at(pos), b: e.b, ref: e.ref, mode: e.mode, ...startV });
     });
     return out;
   }
@@ -323,8 +323,7 @@
     const mode = line.mode || 'none';
     const cA = lineCorner(line, 'a');
     const cB = lineCorner(line, 'b');
-    const edgeDist = Number.isFinite(Number(line.edgeDist)) && line.edgeDist !== null ? Number(line.edgeDist) : null;
-    const edge = (p0, p1, v) => ({ type: 'line', a: p0, b: p1, ref: `l:${line.id}`, mode, edgeDist, ...v });
+    const edge = (p0, p1, v) => ({ type: 'line', a: p0, b: p1, ref: `l:${line.id}`, mode, ...v });
     const withStart = (list, v) => list.map((p, k) => (k === 0 ? { ...p, ...v } : p));
     // Left of a→b: the chord P→Q, then the boundary back from Q to P.
     const left = [edge(ch.P, ch.Q, cA), ...withStart(sp.QP, cB)];
@@ -361,7 +360,7 @@
     const segs = prims.map((p) => {
       const t = G.primStartTangent(p);
       const angle = norm360(G.deg(Math.atan2(t.y, t.x)));
-      const common = { mode: p.mode || 'none', edgeDist: p.edgeDist ?? null, fillet: Number(p.fillet) || 0, corner: p.corner !== false, ref: p.ref, vref: p.vref };
+      const common = { mode: p.mode || 'none', fillet: Number(p.fillet) || 0, corner: p.corner !== false, ref: p.ref, vref: p.vref };
       if (p.type === 'line') return { type: 'line', length: G.dist(p.a, p.b), angle, ...common };
       return { type: 'arc', radius: p.r, sweep: G.deg(p.sweep), angle, ...common };
     });

@@ -13,24 +13,27 @@ function gaps(points) {
   return out;
 }
 
-test('rectangle: a hole on every corner, even spacing on each side', () => {
+test('rectangle: exact spacing on each side; a corner hole is left out where a side doesn’t fit', () => {
   const c = model.rectangle(100, 50, 0, 0, 0, 'holes');
   const r = layout.layoutContour(c, settings, { isOutline: true });
-  // Hole centres sit 3 + 1 = 4 mm in from the edges.
-  for (const [x, y] of [[4, 4], [96, 4], [96, 46], [4, 46]]) assert.ok(hasPoint(r.holes, x, y), `corner ${x},${y}`);
+  // Hole centres sit 3 + 1 = 4 mm in from the edges. The 42 mm sides
+  // don't fit 4 mm spaces, so the corner holes at their far ends go.
+  for (const [x, y] of [[96, 4], [4, 46]]) assert.ok(hasPoint(r.holes, x, y), `corner ${x},${y}`);
+  for (const [x, y] of [[96, 46], [4, 4]]) assert.ok(!hasPoint(r.holes, x, y), `no corner ${x},${y}`);
+  assert.equal(r.removed.length, 2);
   // 92 mm side / 4 = 23 gaps exactly.
   const bottom = r.holes.filter((p) => near(p.y, 4)).sort((a, b) => a.x - b.x);
-  assert.equal(bottom.length, 24);
+  assert.equal(bottom.length, 23);
   gaps(bottom).forEach((g) => assert.ok(near(g, 4)));
-  // 42 mm side: spacing stays exactly 4 and the 2 mm left over is one short
-  // gap at the far corner, flagged.
+  // 42 mm side: spacing stays exactly 4; the last hole is 2 mm short of
+  // the corner, which has no hole.
   const right = r.holes.filter((p) => near(p.x, 96)).sort((a, b) => a.y - b.y);
-  const g = gaps(right);
-  g.slice(0, -1).forEach((x) => assert.ok(near(x, 4)));
-  assert.ok(near(g[g.length - 1], 2));
-  const uneven = r.sections.filter((s) => s.uneven);
-  assert.equal(uneven.length, 2);
-  uneven.forEach((s) => {
+  gaps(right).forEach((x) => assert.ok(near(x, 4)));
+  assert.ok(near(right[right.length - 1].y, 44));
+  assert.equal(r.sections.filter((s) => s.uneven).length, 0);
+  const dropped = r.sections.filter((s) => s.dropped);
+  assert.equal(dropped.length, 2);
+  dropped.forEach((s) => {
     assert.ok(near(s.length, 42));
     assert.ok(near(s.gap, 2));
     assert.equal(s.oddKind, 'corner');
@@ -61,12 +64,11 @@ test('deselected corner gets no forced hole', () => {
   assert.ok(!hasPoint(r.holes, 95, 4, 0.01));
   // The section from (4,4) to (95,46) runs round the corner at exactly
   // 4 mm: 133 mm leaves a 1 mm gap at the far corner.
-  assert.ok(hasPoint(r.holes, 4, 4));
-  assert.ok(hasPoint(r.holes, 95, 46));
+  assert.ok(!hasPoint(r.holes, 95, 46));
   const L = 91 + 42;
   const sec = r.sections.find((s) => near(s.length, L));
   assert.ok(sec, 'merged section');
-  assert.ok(sec.uneven);
+  assert.ok(sec.dropped);
   assert.ok(near(sec.gap, 1));
 });
 
@@ -145,7 +147,7 @@ test('rounded corners: holes follow the curve, no forced corner hole', () => {
 
 test('cutout holes go outside the cutout', () => {
   const c = model.rectangle(20, 10, 0, 40, 20, 'holes');
-  const r = layout.layoutContour(c, settings, { isOutline: false });
+  const r = layout.layoutContour(c, { ...settings, spacing: 2 }, { isOutline: false });
   assert.ok(hasPoint(r.holes, 36, 16));
   assert.ok(hasPoint(r.holes, 64, 34));
 });
@@ -189,7 +191,7 @@ test('mixed modes: holes on one edge, stitch on another', () => {
 });
 
 test('fillet larger than the offset leaves a smaller rounded path; smaller one collapses to a corner', () => {
-  const small = model.rectangle(100, 50, 2, 0, 0, 'holes');
+  const small = model.rectangle(100, 52, 2, 0, 0, 'holes');
   const r = layout.layoutContour(small, settings, { isOutline: true });
   // fillet 2 < offset 4: offset corner is sharp again, so it gets a hole.
   assert.ok(hasPoint(r.holes, 4, 4, 1e-6));
@@ -202,7 +204,7 @@ test('triangle with a concave notch', () => {
   const L = (length, angle) => model.seg('line', { length, angle, mode: 'holes' });
   c.segments = [L(60, 0), L(20, 90), L(30, 180), L(30, 90), L(30, 180)];
   c.closing.mode = 'holes';
-  const r = layout.layoutContour(c, settings, { isOutline: true });
+  const r = layout.layoutContour(c, { ...settings, spacing: 2 }, { isOutline: true });
   // Concave corner at (30, 20): offset point is (26, 16).
   assert.ok(hasPoint(r.holes, 26, 16));
   assert.ok(hasPoint(r.holes, 4, 46));
