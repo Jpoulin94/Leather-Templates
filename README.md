@@ -49,6 +49,12 @@ Click a straight outline edge and choose **Add a notch to this edge**. It starts
 - **Corner holes**: a hole always lands exactly on each corner, and the spacing on each side is adjusted slightly so the holes divide evenly. Turn it off for one corner by clicking it. The hole count in **Stitching** shows any run whose spacing was adjusted; click one to see it on the drawing.
 - **Origin point**: choose **Place origin point** (or press O), then click a hole or a stitch line. A hole stays put there and the others space out from it; on a stitch line a short tick marks the spot on the print. The outline and each shape can have their own. Give mating pieces the same origin and settings, and their holes line up.
 
+### Assemble
+Switch the top bar from **Edit** to **Assemble** to see your pieces stacked flat on top of each other, each in its own colour. Tick the pieces to include on the left. They line up by their origin points; a piece without one is centred on the others.
+- Drag a piece to shift it, or type how far it sits from the origin. **↺ 90° / ↻ 90°** rotate it and **Turn over** flips it for a piece that sits face down.
+- **Shared holes**: wherever one piece's holes sit on another piece, the stitch goes through both, so both need a hole there. Holes that don't line up are circled in red, and the panel counts them for each pair of pieces.
+- **Download picture (SVG)** saves the stack at true size with a colour key. The arrangement is saved with the project; go back to **Edit** to change a piece and the stack updates.
+
 ### Units
 Switch between mm and inches at any time. Inputs accept decimals, fractions (`3/16`, `1 1/2`) and a unit suffix (`10mm`, `2"`).
 
@@ -74,6 +80,7 @@ npm start       # optional: serve the folder on http://localhost:8080
 - `js/geometry.js`: contours, fillets, offsets and intersections
 - `js/layout.js`: hole and stitch-line placement
 - `js/boolean.js`: combining shapes (cut away, merge, overlap, choose lines)
+- `js/assembly.js`: the Assemble view's stacking and shared-hole check
 - `js/resolve.js`: builds each piece from its outline, notches, live shapes and cut lines; resizing
 - `js/model.js`: project data, shapes, units
 - `js/render.js`, `js/pdf.js`: SVG and PDF output

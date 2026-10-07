@@ -1208,3 +1208,92 @@ button.run.on {
   font-weight: 600;
   padding: 9px 4px;
 }
+
+/* Assembly view */
+.mode-seg button {
+  padding: 6px 12px;
+}
+body.assemble .rail,
+body.assemble .legend {
+  display: none;
+}
+.asm-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.asm-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  cursor: pointer;
+}
+.asm-row.on {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 20%, transparent);
+}
+.asm-row .swatch {
+  width: 14px;
+  height: 14px;
+  border-radius: 4px;
+  flex: none;
+}
+.asm-row .name {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.asm-row .muted {
+  font-size: 11px;
+}
+.asm-pair {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 13px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--line);
+}
+.asm-pair:last-child {
+  border-bottom: 0;
+}
+.asm-pair .bad {
+  color: #e03131;
+  font-weight: 600;
+}
+.asm-pair .good {
+  color: #2f9e44;
+  font-weight: 600;
+}
+#canvas.mode-assemble .asm {
+  cursor: move;
+}
+@media (max-width: 720px) {
+  .mode-seg button {
+    padding: 6px 8px;
+  }
+}
+@media (max-width: 720px) {
+  .topbar {
+    flex-wrap: wrap;
+    row-gap: 6px;
+  }
+  .topbar .spacer {
+    display: none;
+  }
+  .mode-seg {
+    order: 10;
+    flex: 1 1 100%;
+  }
+  .mode-seg button {
+    flex: 1;
+  }
+}
