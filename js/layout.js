@@ -3,11 +3,12 @@
 // Holes sit on a path offset from the leather edge by
 // (edge distance + hole radius), toward the material: inward for an
 // outline, outward for a cutout. Holes are placed on runs of consecutive
-// edges set to 'holes'. Within a run, "anchors" always get a hole:
+// edges set to 'holes'. Within a run, "anchors" pin the pattern:
 //   - sharp corners whose corner hole is switched on,
-//   - the origin point, when it sits on the run.
-// Between anchors the spacing is stretched or shrunk slightly so the holes
-// divide the distance evenly. Where a run ends at an edge without holes
+//   - the origin points that sit on the run.
+// Between anchors the holes are exactly the set spacing apart, always. If
+// the distance isn't a whole number of spaces, the corner hole at the far
+// end is left out (see `fit`). Where a run ends at an edge without holes
 // (an open end) that edge is ignored: holes carry on at exactly the set
 // spacing from the nearest anchor, right up to that edge, as long as each
 // leaves at least MARGIN of leather before it. A run with no anchors
@@ -56,8 +57,11 @@
   // Holes at exactly `spacing` between two anchors that both get a hole.
   // The pattern starts from an origin if one end is an origin, otherwise
   // from the first anchor; whatever is left over shows up as one short
-  // gap at the other end (`gap`, with `uneven` set), unless the hole at
-  // that end has been removed (`skip`), which leaves every gap exact.
+  // gap at the other end. Spacing never changes, so where that end is a
+  // corner hole (or a stitch path's end or bend) the hole is left out
+  // instead (`dropped`): the stitching turns just before it. Only between
+  // two origins, or round a closed run with no corners, does a short gap
+  // remain (`uneven`).
   function fit(A, B, spacing) {
     const length = B.s - A.s;
     const back = B.kind === 'origin' && A.kind !== 'origin';
@@ -68,12 +72,16 @@
     if (rem > TOL) pos.push(back ? A.s : B.s);
     if (rem <= TOL) rem = 0;
     const odd = back ? A : B;
+    const short = rem > TOL && rem < spacing - TOL;
+    const drop = odd.kind === 'corner' || odd.kind === 'end';
     return {
       pos,
       length,
       actual: spacing,
       gap: rem,
-      uneven: rem > TOL && rem < spacing - TOL && !odd.skip,
+      uneven: short && !drop,
+      dropped: short && drop,
+      oddS: odd.s,
       oddEnd: back ? 'from' : 'to',
       oddKind: odd.kind,
       oddVertex: odd.kind === 'corner' || odd.kind === 'end' ? odd.v : null,
@@ -83,8 +91,6 @@
   // reach: how far holes may run on past each open end ({ start, end }, mm).
   // opts.anchorEnds: both ends of an open run get a hole (stitch paths),
   // unless an origin is on the run.
-  // opts.skip: vrefs of corners (or path ends) whose hole is removed. The
-  // pattern still turns there, it just doesn't punch it.
   function layoutRun(run, contour, spacing, origins, reach, opts) {
     reach = reach || { start: 0, end: 0 };
     opts = opts || {};
@@ -95,24 +101,17 @@
     prims.forEach((p) => cum.push(cum[cum.length - 1] + G.primLength(p)));
     const L = cum[cum.length - 1];
     const corner = (v) => G.vertexProps(contour, v).corner;
-    const skip = opts.skip || new Set();
-    const skipped = (v) => {
-      const ref = segOf(contour, v).vref;
-      return !!ref && skip.has(ref);
-    };
 
     const anchors = [];
     for (let j = 1; j < prims.length; j++) {
-      if (isSharp(prims[j - 1], prims[j]) && corner(prims[j].vStart)) anchors.push({ s: cum[j], kind: 'corner', v: prims[j].vStart, skip: skipped(prims[j].vStart) });
+      if (isSharp(prims[j - 1], prims[j]) && corner(prims[j].vStart)) anchors.push({ s: cum[j], kind: 'corner', v: prims[j].vStart });
     }
     if (run.closed && isSharp(prims[prims.length - 1], prims[0]) && corner(prims[0].vStart)) {
-      anchors.push({ s: 0, kind: 'corner', v: prims[0].vStart, skip: skipped(prims[0].vStart) });
+      anchors.push({ s: 0, kind: 'corner', v: prims[0].vStart });
     }
     origins.forEach((o) => anchors.push({ s: o, kind: 'origin' }));
     if (!run.closed && opts.anchorEnds && !origins.length) {
-      const a = prims[0].vStart;
-      const b = prims[prims.length - 1].vEnd;
-      anchors.push({ s: 0, kind: 'end', v: a, skip: skipped(a) }, { s: L, kind: 'end', v: b, skip: skipped(b) });
+      anchors.push({ s: 0, kind: 'end', v: prims[0].vStart }, { s: L, kind: 'end', v: prims[prims.length - 1].vEnd });
     }
     anchors.sort((a, b) => a.s - b.s);
     // An origin on a corner is still that corner's hole; keep the origin.
@@ -120,7 +119,7 @@
     anchors.forEach((a) => {
       const last = uniq[uniq.length - 1];
       if (last && a.s - last.s < 1e-6) {
-        if (a.kind === 'origin') uniq[uniq.length - 1] = { ...last, kind: 'origin', skip: false };
+        if (a.kind === 'origin') uniq[uniq.length - 1] = { ...last, kind: 'origin' };
       } else uniq.push(a);
     });
 
@@ -166,14 +165,16 @@
       positions = positions.concat(exact(last, fixed.end ? L : L + reach.end, 1));
       if (L - last > 1e-6) sections.push({ pos: [], actual: spacing, gap: 0, uneven: false, length: L - last, from: last, to: L, path: prims, closed: false });
     }
-    // Removed holes: drop them, and note where they were.
-    const gone = uniq.filter((a) => a.skip).map((a) => (run.closed ? ((a.s % L) + L) % L : a.s));
+    // Corner holes left out to keep the spacing: drop them, and note where
+    // they were.
+    const goneAt = [...new Set(sections.filter((x) => x.dropped).map((x) => x.oddS))];
+    const gone = goneAt.map((g) => (run.closed ? ((g % L) + L) % L : g));
     const near = (x, g) => Math.abs(x - g) < 1e-6 || (run.closed && Math.abs(Math.abs(x - g) - L) < 1e-6);
     positions = positions.filter((x) => !gone.some((g) => near(x, g)));
     positions.sort((a, b) => a - b);
     const dedup = positions.filter((x, i) => i === 0 || x - positions[i - 1] > 1e-6);
     if (run.closed && dedup.length > 1 && L - dedup[dedup.length - 1] + dedup[0] < 1e-6) dedup.pop();
-    const removed = uniq.filter((a) => a.skip).map((a) => ({ pt: pointAt(prims, L, a.s), vref: segOf(contour, a.v).vref }));
+    const removed = gone.map((g) => ({ pt: pointAt(prims, L, g) }));
     return { points: dedup.map((x) => pointAt(prims, L, x)), positions: dedup, sections, path: prims, length: L, fixed, pinned, removed };
   }
 
@@ -276,7 +277,7 @@
   }
 
   // settings: { holeDiameter, spacing, edgeDistance, stitchOffset }
-  // opts: { isOutline, origins: [{x, y, id, name}], path, skip: Set of vrefs }
+  // opts: { isOutline, origins: [{x, y, id, name}], path }
   // The origin snaps to the nearest hole run or stitch line of the contour.
   // On a hole run a hole always lands on it; on a stitch line it is marked
   // with a short tick across the line.
@@ -315,7 +316,7 @@
       const os = snapped.filter((b) => b.kind === 'hole' && b.i === i).map((b) => b.s);
       const info = opts.path ? { start: null, end: null } : endInfo(run, prims, settings.holeDiameter / 2);
       const reach = { start: info.start ? info.start.reach : 0, end: info.end ? info.end.reach : 0 };
-      const r = layoutRun(run, contour, settings.spacing, os, reach, { anchorEnds: !!opts.path, skip: opts.skip });
+      const r = layoutRun(run, contour, settings.spacing, os, reach, { anchorEnds: !!opts.path });
       res.holes = res.holes.concat(r.points);
       res.removed = res.removed.concat(r.removed);
       res.holePaths.push({ prims: r.path, closed: run.closed });
@@ -367,18 +368,17 @@
 
   function layoutPiece(project, piece) {
     const settings = pieceSettings(project);
-    const skip = new Set(piece.skipHoles || []);
     const resolved = LT.resolve.resolvePiece(piece);
     const empty = { start: null, segments: [], closing: { mode: 'none', fillet: 0, corner: true } };
-    const outline = layoutContour(resolved.outline || empty, settings, { isOutline: true, origins: LT.model.originsOf(piece.outline), skip });
+    const outline = layoutContour(resolved.outline || empty, settings, { isOutline: true, origins: LT.model.originsOf(piece.outline) });
     const cutouts = resolved.cutouts.map((c) => ({
-      ...layoutContour(c.contour, settings, { isOutline: false, origins: c.origins || [], skip }),
+      ...layoutContour(c.contour, settings, { isOutline: false, origins: c.origins || [] }),
       src: c.src,
     }));
     const paths = (piece.paths || [])
       .filter((p) => (p.points || []).length > 1)
       .map((p) => ({
-        ...layoutContour(pathContour(p), settings, { isOutline: true, path: true, origins: LT.model.originsOf(p), skip }),
+        ...layoutContour(pathContour(p), settings, { isOutline: true, path: true, origins: LT.model.originsOf(p) }),
         src: p.id,
         kind: 'path',
         closed: !!p.closed,

@@ -117,9 +117,10 @@
   // ---------------------------------------------------------------------
   // Sides that don't divide evenly. Spacing never stretches, so between two
   // holes that are pinned (corner holes, origins, path ends) whatever is
-  // left over shows as one short gap. Three ways out, keeping the holes the
-  // same distance from every edge:
-  //   remove    take out the hole at the corner where the short gap is
+  // left over is never a short gap: the corner hole at that end is left out
+  // (`dropped`). Only between two origins, or round a closed run with no
+  // corners, is a short gap left. Two ways to make the side fit, so the
+  // hole comes back, keeping the holes the same distance from every edge:
   //   outline   make the side longer (slide the edge across the corner, or
   //             move the stitch path's point)
   //   distance  a shorter holes-from-edge for the whole project
@@ -132,7 +133,7 @@
     LT.layout.allOf(lay).forEach((c, i) => {
       const where = c.kind === 'path' ? c.src : whereOf(c, i);
       c.sections.forEach((sec) => {
-        if (!sec.uneven) return;
+        if (!sec.uneven && !sec.dropped) return;
         const v = sec.oddVertex;
         const at = sec.oddEnd === 'to' ? sec.to : sec.from;
         const L = G.pathLength(sec.path);
@@ -162,6 +163,7 @@
           section: sec,
           length: sec.length,
           gap: sec.gap,
+          dropped: !!sec.dropped,
           oddKind: sec.oddKind,
           vertex: v,
           pt,
@@ -175,17 +177,11 @@
   }
 
   // Change the piece for one kind of fix. Mutates the piece.
-  //   'remove'   take out the hole at the short gap's corner
   //   'outline'  slide the edge across the corner by amount mm, making the
   //              side longer (positive) or shorter
   //   'point'    the same for a stitch path: move its point at the corner
   // (A new holes-from-edge is a project setting: see `distanceFixes`.)
   function applyFix(piece, u, kind, amount) {
-    if (kind === 'remove') {
-      if (!u.vref) return false;
-      piece.skipHoles = [...new Set([...(piece.skipHoles || []), u.vref])];
-      return true;
-    }
     if (kind === 'point') {
       const path = (piece.paths || []).find((p) => p.id === u.where);
       if (!path || u.vertex === null) return false;
@@ -215,7 +211,7 @@
         if (sec.oddVertex === u.vertex && sec.oddEnd === u.section.oddEnd) found = sec;
       });
     });
-    return found ? { length: found.length, even: !found.uneven } : null;
+    return found ? { length: found.length, even: !found.uneven && !found.dropped } : null;
   }
 
   const withDistance = (project, e) => ({ ...project, defaults: { ...project.defaults, edgeDistance: e } });
@@ -272,15 +268,15 @@
     return out;
   }
 
-  // Uneven sides with their fixes:
-  //   remove: true             the corner hole can be taken out
+  // Sides that don't fit (a corner hole left out, or a short gap) with
+  // their fixes:
   //   outline: [{ amount }]    make the side (or leg) this much longer
   //   distance: [{ amount, left }]  a shorter holes-from-edge
   function uneven(project, piece, lay) {
     lay = lay || LT.layout.layoutPiece(project, piece);
     const s = project.defaults.spacing;
     return unevenOf(lay).map((u) => {
-      const fix = { remove: !!u.vref && (u.oddKind === 'corner' || u.oddKind === 'end'), outline: [], distance: [] };
+      const fix = { outline: [], distance: [] };
       const moveKind = u.isPath ? 'point' : 'outline';
       if (u.isPath ? u.vertex !== null : u.across && movable(u.across.ref)) {
         const t = Math.floor(u.length / s + 1e-9) * s + s;

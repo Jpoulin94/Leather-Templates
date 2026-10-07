@@ -50,9 +50,7 @@
   // combined shapes stay editable; js/resolve.js builds the final result.
   // The outline, each shape and each stitch path may carry origin points
   // (`origins`: [{ id, name, x, y }]). Stitch paths (`paths`) are lines of
-  // holes or stitching drawn on the piece that cut nothing. `skipHoles`
-  // lists corners (by vref) whose hole is removed so the spacing stays
-  // exact.
+  // holes or stitching drawn on the piece that cut nothing.
   function newPiece(name, outline) {
     return {
       id: uid(),
@@ -62,7 +60,6 @@
       cutouts: [],
       lines: [],
       paths: [],
-      skipHoles: [],
     };
   }
 
@@ -192,7 +189,6 @@
         notches: (pc.notches || []).map((n) => ({ ...newNotch(0, 20, 10), ...n, corners: { L: { fillet: 0, corner: true }, R: { fillet: 0, corner: true }, ...(n.corners || {}) } })),
         cutouts: (pc.cutouts || []).map((c) => fixOrigins({ id: uid(), op: 'hole', joins: {}, ...fixContour(c) })),
         lines: (pc.lines || []).filter((l) => l && l.a && l.b).map((l) => ({ ...newLine(l.a, l.b), ...l, corners: { a: { fillet: 0, corner: true }, b: { fillet: 0, corner: true }, ...(l.corners || {}) } })),
-        skipHoles: (pc.skipHoles || []).filter((v) => typeof v === 'string'),
         paths: (pc.paths || []).filter((p) => p && Array.isArray(p.points) && p.points.length > 1).map((p) => fixOrigins({ ...newPath(p.points), ...p, corners: { ...(p.corners || {}) } })),
       };
       fixOrigins(out.outline);
