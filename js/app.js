@@ -6,7 +6,7 @@
 // clicking it edits the right thing and everything stays editable.
 (function () {
   'use strict';
-  const { model: M, geom: G, layout: Lay, render: R, pdf: P, storage: S, resolve: RS } = window.LT;
+  const { model: M, geom: G, layout: Lay, render: R, pdf: P, storage: S, resolve: RS, assembly: AS } = window.LT;
 
   const $ = (sel, el = document) => el.querySelector(sel);
   const $$ = (sel, el = document) => Array.from(el.querySelectorAll(sel));
@@ -91,6 +91,8 @@
     lineStart: null, // first point of a cut line being drawn
     linePick: null, // id of a new cut line waiting for a part to be picked
     guides: null, // { x, y } alignment guides while dragging
+    mode: 'edit', // 'edit' | 'assemble'
+    asmSel: null, // piece id picked in the assembly view
     alignTarget: 'outline',
     advOpen: false,
     stitchOpen: pref('stitchOpen', true),
@@ -317,6 +319,7 @@
     ui.pieceIdx = Math.min(ui.pieceIdx, project.pieces.length - 1);
     validateSel();
     if (ui.tool === 'draw' || ui.tool === 'trim') ui.tool = 'select';
+    if (ui.asmSel && !project.pieces.some((x) => x.id === ui.asmSel)) ui.asmSel = null;
     ui.combine = null;
     ui.trim = null;
     ui.lineStart = null;
@@ -889,7 +892,7 @@
   function fitView() {
     const w = svg.clientWidth || 800;
     const h = svg.clientHeight || 600;
-    let b = Lay.pieceBBox(curLay());
+    let b = ui.mode === 'assemble' ? asmBBox(AS.buildAssembly(project)) : Lay.pieceBBox(curLay());
     if (!b || b.maxX - b.minX < 1e-6) b = { minX: -20, minY: -20, maxX: 180, maxY: 130 };
     const bw = Math.max(b.maxX - b.minX, 20);
     const bh = Math.max(b.maxY - b.minY, 20);
@@ -942,6 +945,10 @@
     const h = svg.clientHeight;
     if (!w || !h) return;
     if (!ui.view) fitView();
+    if (ui.mode === 'assemble') {
+      renderAssemblyCanvas(w, h);
+      return;
+    }
     const s = ui.view.scale;
     const x0 = ui.view.cx - w / 2 / s;
     const y0 = -ui.view.cy - h / 2 / s;
@@ -1219,6 +1226,12 @@
   }
 
   function handleCanvasClick(target, world, shiftKey) {
+    if (ui.mode === 'assemble') {
+      const el = target && target.closest ? target.closest('[data-asm]') : null;
+      ui.asmSel = el ? el.dataset.asm : null;
+      renderAll();
+      return;
+    }
     if (ui.tool === 'draw') {
       addDrawPoint(world);
       return;
@@ -1381,6 +1394,15 @@
 
   svg.addEventListener('pointerdown', (e) => {
     ui.ptr = { x: e.clientX, y: e.clientY, cx: ui.view.cx, cy: ui.view.cy, moved: false, target: e.target, button: e.button, shift: e.shiftKey };
+    if (ui.mode === 'assemble') {
+      const el = e.button === 0 && e.target.closest ? e.target.closest('[data-asm]') : null;
+      if (el) {
+        const en = asmEntry(el.dataset.asm);
+        ui.ptr.asmDrag = { id: el.dataset.asm, dx: Number(en.dx) || 0, dy: Number(en.dy) || 0 };
+      }
+      svg.setPointerCapture(e.pointerId);
+      return;
+    }
     const grab = e.button === 0 && ui.tool === 'select' && !ui.combine && !e.shiftKey && e.target.closest
       ? e.target.closest('[data-shape]')
       : null;
@@ -1400,7 +1422,20 @@
       const dx = e.clientX - ui.ptr.x;
       const dy = e.clientY - ui.ptr.y;
       if (Math.hypot(dx, dy) > 4) ui.ptr.moved = true;
-      if (ui.ptr.moved && ui.ptr.drag) {
+      if (ui.ptr.moved && ui.ptr.asmDrag) {
+        const d = ui.ptr.asmDrag;
+        let mx = dx / ui.view.scale;
+        let my = -dy / ui.view.scale;
+        if (ui.snap) {
+          const st = minorStep();
+          mx = Math.round(mx / st) * st;
+          my = Math.round(my / st) * st;
+        }
+        const en = asmEntry(d.id, true);
+        en.dx = round(d.dx + mx);
+        en.dy = round(d.dy + my);
+        ui.asmSel = d.id;
+      } else if (ui.ptr.moved && ui.ptr.drag) {
         dragTo(ui.ptr.drag, dx / ui.view.scale, -dy / ui.view.scale);
       } else if (ui.ptr.moved) {
         ui.view.cx = ui.ptr.cx - dx / ui.view.scale;
@@ -1414,6 +1449,10 @@
   svg.addEventListener('pointerup', (e) => {
     const p = ui.ptr;
     ui.ptr = null;
+    if (p && p.asmDrag && p.moved) {
+      commit();
+      return;
+    }
     if (p && p.drag && p.moved) {
       ui.guides = null;
       commit();
@@ -2553,6 +2592,214 @@
   }
 
   // ---------------------------------------------------------------------
+  // Assembly view: every piece stacked flat, lined up by origin point, in
+  // its own colour; holes that should share a stitch but don't are flagged.
+
+  function asmEntry(id, create = false) {
+    project.assembly = project.assembly || { pieces: {} };
+    project.assembly.pieces = project.assembly.pieces || {};
+    const cur = project.assembly.pieces[id];
+    if (cur) return cur;
+    const e = { on: true, dx: 0, dy: 0, rot: 0, flip: false };
+    if (create) project.assembly.pieces[id] = e;
+    return e;
+  }
+
+  function asmBBox(asm) {
+    const prims = asm.shown.flatMap((it) => it.outline);
+    return prims.length ? G.bbox(prims) : null;
+  }
+
+  function setMode(mode) {
+    if (ui.mode === mode) return;
+    if (ui.tool === 'draw') finishDraw();
+    ui.tool = 'select';
+    ui.combine = null;
+    ui.trim = null;
+    ui.lineStart = null;
+    ui.linePick = null;
+    ui.mode = mode;
+    ui.view = null;
+    clearSel();
+    renderAll();
+  }
+
+  // The stack as SVG markup (y flipped). Shared by the canvas and the
+  // downloaded picture.
+  function assemblySvg(asm, opts = {}) {
+    const out = [];
+    const px = opts.px || ((n) => n / 3.78);
+    const bad = new Set(asm.check.bad.map((x) => x));
+    asm.shown.forEach((it) => {
+      const on = opts.sel === it.piece.id;
+      const d = R.pathData(it.outline, flip, true) + it.cutouts.map((c) => R.pathData(c, flip, true)).join('');
+      out.push(`<path class="asm" d="${d}" fill="${it.color}" fill-opacity="0.13" fill-rule="evenodd" stroke="${it.color}" stroke-width="${on ? 3 : 1.6}" vector-effect="non-scaling-stroke" data-asm="${it.piece.id}"/>`);
+      it.stitch.forEach((st) => out.push(`<path d="${R.pathData(st.prims, flip, st.closed)}" fill="none" stroke="${it.color}" stroke-width="1.2" stroke-dasharray="5 3" vector-effect="non-scaling-stroke" pointer-events="none"/>`));
+      it.holes.forEach((h) => out.push(`<circle cx="${num(h.x)}" cy="${num(-h.y)}" r="${num(it.holeRadius)}" fill="none" stroke="${it.color}" stroke-width="1.1" vector-effect="non-scaling-stroke" pointer-events="none"/>`));
+    });
+    // Flagged holes on top of everything
+    bad.forEach((x) => {
+      out.push(`<circle cx="${num(x.pt.x)}" cy="${num(-x.pt.y)}" r="${num(Math.max(x.item.holeRadius * 1.9, px(6)))}" fill="#e03131" fill-opacity="0.25" stroke="#e03131" stroke-width="2" vector-effect="non-scaling-stroke" pointer-events="none"><title>${esc(x.item.piece.name)}: no matching hole in ${esc(x.other.piece.name)}</title></circle>`);
+    });
+    // Shared origin
+    const o = asm.shown.find((it) => it.hasOrigin);
+    if (o) {
+      const r = px(7);
+      out.push(`<g stroke="var(--zero, #ea580c)" stroke-width="2" fill="none" pointer-events="none"><circle cx="${num(o.origin.x)}" cy="${num(-o.origin.y)}" r="${num(r)}" vector-effect="non-scaling-stroke"/><path d="M${num(o.origin.x - r * 1.7)} ${num(-o.origin.y)}H${num(o.origin.x + r * 1.7)}M${num(o.origin.x)} ${num(-o.origin.y - r * 1.7)}V${num(-o.origin.y + r * 1.7)}" vector-effect="non-scaling-stroke"/></g>`);
+    }
+    return out.join('');
+  }
+
+  function renderAssemblyCanvas(w, h) {
+    const s = ui.view.scale;
+    const x0 = ui.view.cx - w / 2 / s;
+    const y0 = -ui.view.cy - h / 2 / s;
+    svg.setAttribute('viewBox', `${x0} ${y0} ${w / s} ${h / s}`);
+    svg.setAttribute('class', 'mode-assemble');
+    const asm = AS.buildAssembly(project);
+    svg.innerHTML = gridSvg(x0, y0, w / s, h / s, s) + assemblySvg(asm, { px: (n) => n / s, sel: ui.asmSel });
+    const bad = asm.check.bad.length;
+    $('#hint').textContent = !asm.shown.length
+      ? 'Tick the pieces to stack on the left.'
+      : `${bad ? `${bad} hole${bad === 1 ? '' : 's'} don’t line up (red)` : 'All shared holes line up'} · drag a piece to move it · scroll to zoom`;
+    renderZoom();
+  }
+
+  function renderAssemblyLeft() {
+    const asm = AS.buildAssembly(project);
+    const rows = asm.items
+      .map((it) => `<div class="asm-row ${ui.asmSel === it.piece.id ? 'on' : ''}" data-asm-pick="${it.piece.id}">
+          <input type="checkbox" data-asm-on="${it.piece.id}" ${it.on ? 'checked' : ''} aria-label="Show ${esc(it.piece.name)}">
+          <i class="swatch" style="background:${it.color}"></i>
+          <span class="name">${esc(it.piece.name)}</span>
+          ${it.hasOrigin ? '' : '<span class="muted">no origin</span>'}</div>`)
+      .join('');
+    $('#leftPanel').innerHTML = `
+      <div class="section-title">Stack</div>
+      <div class="asm-list">${rows || '<p class="note">No pieces with an outline yet.</p>'}</div>
+      <p class="note" style="margin-top:10px">Tick the pieces to stack. They line up by their origin points; a piece without one is centred on the others.</p>`;
+  }
+
+  // Shared-hole results, one line per pair of pieces.
+  function pairLines(asm) {
+    const map = new Map();
+    asm.check.pairs.forEach((p) => {
+      const [x, y] = p.a.index < p.b.index ? [p.a, p.b] : [p.b, p.a];
+      const key = `${x.piece.id}|${y.piece.id}`;
+      const cur = map.get(key) || { x, y, matched: 0, missed: 0 };
+      cur.matched += p.matched;
+      cur.missed += p.missed;
+      map.set(key, cur);
+    });
+    return [...map.values()];
+  }
+
+  function renderAssemblyRight() {
+    const asm = AS.buildAssembly(project);
+    const it = asm.items.find((x) => x.piece.id === ui.asmSel);
+    const pairs = pairLines(asm);
+    const check = pairs.length
+      ? pairs.map((p) => `<div class="asm-pair"><span>${esc(p.x.piece.name)} + ${esc(p.y.piece.name)}</span><span>${p.missed ? `<span class="bad">${p.missed} off</span> · ` : ''}<span class="good">${p.matched} line up</span></span></div>`).join('')
+      : '<p class="note">No pieces overlap with holes yet.</p>';
+    const checkCard = `<div class="card"><h4>${icon('check')} Shared holes</h4>${check}
+      <p class="note">Where one piece’s holes sit on another piece, the stitch goes through both, so both need a hole there. Ones that don’t match are circled in red.</p></div>`;
+    const dl = `<button class="small" id="asmDownload">${icon('laser')} Download picture (SVG)</button>`;
+    if (!it) {
+      $('#rightPanel').innerHTML = `${head('piece', 'Assemble', `${asm.shown.length} of ${asm.items.length} pieces stacked`)}
+        <div class="tip">${icon('info')}<div>Click a piece to move, turn or flip it. Go back to <b>Edit</b> to change a piece; the stack updates.</div></div>
+        ${checkCard}${dl}`;
+      return;
+    }
+    const e = asmEntry(it.piece.id);
+    $('#rightPanel').innerHTML = `${head('piece', it.piece.name, it.hasOrigin ? 'Lined up by its origin point' : 'No origin point: centred')}
+      <div class="card"><h4>Turn</h4><div class="row">
+        <button class="small" data-asm-rot="90">↺ 90°</button><button class="small" data-asm-rot="-90">↻ 90°</button>
+        <button class="small ${e.flip ? 'primary' : ''}" id="asmFlip">${e.flip ? 'Turned over' : 'Turn over'}</button></div>
+        <p class="note">Turn over flips it left to right, for a piece that sits face down.</p></div>
+      <div class="card"><h4>Shift from the origin</h4><div class="grid2">
+        <label class="fld"><span>Across</span>${numInput('id="asmDx"', Number(e.dx) || 0)}</label>
+        <label class="fld"><span>Up</span>${numInput('id="asmDy"', Number(e.dy) || 0)}</label></div>
+        <button class="small" id="asmReset" style="margin-top:8px">Line up by origin again</button></div>
+      ${checkCard}
+      <div class="row"><button class="small" id="asmEdit">${icon('pen')} Edit this piece</button>${dl}</div>`;
+  }
+
+  function downloadAssembly() {
+    const asm = AS.buildAssembly(project);
+    const b = asmBBox(asm);
+    if (!b) return toast('Tick at least one piece first.');
+    const pad = 10;
+    const x = b.minX - pad;
+    const y = -b.maxY - pad;
+    const w = b.maxX - b.minX + 2 * pad;
+    const hgt = b.maxY - b.minY + 2 * pad;
+    const legend = asm.shown.map((it, i) => `<text x="${num(x + 2)}" y="${num(y + hgt + 6 + i * 5)}" font-size="4" font-family="sans-serif" fill="${it.color}">■ ${esc(it.piece.name)}</text>`).join('');
+    const body = assemblySvg(asm, { px: (n) => n / 3.78 }).replace(/ vector-effect="non-scaling-stroke"/g, '').replace(/stroke-width="([\d.]+)"/g, (m, v) => `stroke-width="${num(Number(v) * 0.25)}"`);
+    const H = hgt + 8 + asm.shown.length * 5;
+    const svgText = `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="${num(w)}mm" height="${num(H)}mm" viewBox="${num(x)} ${num(y)} ${num(w)} ${num(H)}"><rect x="${num(x)}" y="${num(y)}" width="${num(w)}" height="${num(H)}" fill="#fff"/>${body}${legend}</svg>`;
+    S.download(`${S.safeFilename(project.name)}-assembly.svg`, svgText, 'image/svg+xml');
+    toast('Assembly picture downloaded.');
+  }
+
+  $('#leftPanel').addEventListener('click', (e) => {
+    const row = ui.mode === 'assemble' && !e.target.closest('input') ? e.target.closest('[data-asm-pick]') : null;
+    if (!row) return;
+    ui.asmSel = ui.asmSel === row.dataset.asmPick ? null : row.dataset.asmPick;
+    renderAll();
+  });
+
+  $('#rightPanel').addEventListener('click', (e) => {
+    if (ui.mode !== 'assemble') return;
+    const t = e.target.closest('button');
+    if (!t) return;
+    if (t.id === 'asmDownload') {
+      downloadAssembly();
+      return;
+    }
+    const id = ui.asmSel;
+    if (!id) return;
+    const en = asmEntry(id, true);
+    if (t.dataset.asmRot) {
+      en.rot = ((((Number(en.rot) || 0) + Number(t.dataset.asmRot)) % 360) + 360) % 360;
+      commit();
+    } else if (t.id === 'asmFlip') {
+      en.flip = !en.flip;
+      commit();
+    } else if (t.id === 'asmReset') {
+      en.dx = 0;
+      en.dy = 0;
+      commit();
+    } else if (t.id === 'asmEdit') {
+      const i = project.pieces.findIndex((x) => x.id === id);
+      setMode('edit');
+      if (i >= 0) selectPiece(i, false);
+      renderAll();
+    }
+  });
+
+  $('#rightPanel').addEventListener('change', (e) => {
+    if (ui.mode !== 'assemble' || !ui.asmSel) return;
+    const t = e.target;
+    if (t.id !== 'asmDx' && t.id !== 'asmDy') return;
+    const v = M.parseLength(t.value, units());
+    if (!Number.isFinite(v)) {
+      bad(t);
+      return;
+    }
+    asmEntry(ui.asmSel, true)[t.id === 'asmDx' ? 'dx' : 'dy'] = v;
+    commit();
+  });
+
+  $('#leftPanel').addEventListener('change', (e) => {
+    const t = e.target;
+    if (t.dataset.asmOn) {
+      asmEntry(t.dataset.asmOn, true).on = t.checked;
+      commit();
+    }
+  });
+
+  // ---------------------------------------------------------------------
   // Top bar, menus, saving, export
 
   function closeMenus() {
@@ -2572,6 +2819,8 @@
     const nameEl = $('#projectName');
     if (document.activeElement !== nameEl) nameEl.value = project.name;
     $$('[data-units]').forEach((b) => b.classList.toggle('on', b.dataset.units === units()));
+    $$('[data-mode]').forEach((b) => b.classList.toggle('on', b.dataset.mode === ui.mode));
+    document.body.classList.toggle('assemble', ui.mode === 'assemble');
     $('#btnUndo').innerHTML = icon('undo');
     $('#btnRedo').innerHTML = icon('redo');
     $('#btnUndo').disabled = !history.undo.length;
@@ -2584,6 +2833,12 @@
 
   function renderAll() {
     renderTop();
+    if (ui.mode === 'assemble') {
+      renderAssemblyLeft();
+      renderAssemblyRight();
+      renderCanvas();
+      return;
+    }
     renderRail();
     renderLeft();
     renderRight();
@@ -2750,6 +3005,9 @@
       commit();
     })
   );
+  $$('[data-mode]').forEach((b) =>
+    b.addEventListener('click', () => setMode(b.dataset.mode))
+  );
   $('#btnUndo').addEventListener('click', undo);
   $('#btnRedo').addEventListener('click', redo);
 
@@ -2762,6 +3020,13 @@
       return;
     }
     if (typing || $('#dialog').open) return;
+    if (ui.mode === 'assemble' && !mod) {
+      if (e.key === 'Escape') {
+        ui.asmSel = null;
+        renderAll();
+      }
+      return;
+    }
     if (mod) {
       const k = e.key.toLowerCase();
       if (k === 'z' && !e.shiftKey) {

@@ -15,6 +15,10 @@
       <input id="projectName" class="project-name" type="text" spellcheck="false" aria-label="Project name" />
       <span id="saveState" class="save-state"></span>
       <div class="spacer"></div>
+      <div class="seg mode-seg" role="radiogroup" aria-label="View">
+        <button data-mode="edit" role="radio">Edit</button>
+        <button data-mode="assemble" role="radio">Assemble</button>
+      </div>
       <div class="icon-group">
         <button id="btnUndo" class="icon-btn" title="Undo (Ctrl+Z)" aria-label="Undo"></button>
         <button id="btnRedo" class="icon-btn" title="Redo (Ctrl+Y)" aria-label="Redo"></button>
@@ -46,7 +50,7 @@
 
         <nav class="rail" id="rail" aria-label="Tools"></nav>
 
-        <div class="legend" aria-hidden="true">
+        <div class="legend" id="legend" aria-hidden="true">
           <span><i class="sw holes"></i>Holes</span>
           <span><i class="sw stitch"></i>Stitch line</span>
           <span><i class="sw none"></i>Cut line</span>
@@ -74,6 +78,7 @@
     <script src="js/model.js"></script>
     <script src="js/boolean.js"></script>
     <script src="js/resolve.js"></script>
+    <script src="js/assembly.js"></script>
     <script src="js/render.js"></script>
     <script src="js/pdf.js"></script>
     <script src="js/storage.js"></script>
