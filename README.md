@@ -46,7 +46,8 @@ Click a straight outline edge and choose **Add a notch to this edge**. It starts
 
 ### Holes and stitch lines
 - Set the hole diameter, the spacing (centre to centre), the distance from the hole's edge to the leather edge, and the stitch-line distance under **Stitching**. Every piece uses the same sizes.
-- **Corner holes**: a hole always lands exactly on each corner, and the spacing on each side is adjusted slightly so the holes divide evenly. Turn it off for one corner by clicking it. The hole count in **Stitching** shows any run whose spacing was adjusted; click one to see it on the drawing.
+- **Corner holes**: where two edges with holes meet, a hole lands exactly on the corner, and the spacing between corners (and origin points) is adjusted slightly so the holes divide evenly. Turn it off for one corner by clicking it. The hole count in **Stitching** shows any run whose spacing was adjusted; click one to see it on the drawing.
+- **Edges without holes**: where an edge with holes meets an edge without holes, that edge is ignored: the holes keep exactly the set spacing, counted from the nearest corner hole or origin point (or from the start of the edge), and carry on right up to it as long as each leaves at least 0.5 mm of leather. If the next hole would touch or cross that edge, so the edge would cut through a hole on a piece stacked with this one, **Stitching** flags it and rings the hole on the drawing. Click a suggestion to move the edge to the nearest spot that clears the hole, or type your own distance and choose **Longer** or **Shorter**. Edges of notches can't be moved this way; for a Line, you can also type the kept length in its settings.
 - **Origin point**: choose **Place origin point** (or press O), then click a hole or a stitch line. A hole stays put there and the others space out from it; on a stitch line a short tick marks the spot on the print. The outline and each shape can have their own. Give mating pieces the same origin and settings, and their holes line up.
 
 ### Assemble
@@ -60,7 +61,7 @@ Switch between mm and inches at any time. Inputs accept decimals, fractions (`3/
 
 ### Output
 Click **Export**, then pick the PDF or SVG, the paper size and which pieces to include.
-- **Printable PDF (1:1)**: Letter or A4. Print at **100% / Actual size** and measure the check square. Pieces bigger than the page are split across pages: trim each page on the dashed border and line up the + marks.
+- **Printable PDF (1:1)**: Letter or A4. Print at **100% / Actual size** and measure the check square on each page: it should be exactly 20 mm. Pieces bigger than the page are split across pages: trim each page on the dashed border and line up the + marks.
 - **Laser SVG**: true size in mm. Red is cut (outline, cutouts, holes) and blue is score or engrave (stitch lines).
 
 ### Saving
@@ -81,6 +82,7 @@ npm start       # optional: serve the folder on http://localhost:8080
 - `js/layout.js`: hole and stitch-line placement
 - `js/boolean.js`: combining shapes (cut away, merge, overlap, choose lines)
 - `js/assembly.js`: the Assemble view's stacking and shared-hole check
+- `js/clearance.js`: edges without holes that cut through a hole, and the moves that clear them
 - `js/resolve.js`: builds each piece from its outline, notches, live shapes and cut lines; resizing
 - `js/model.js`: project data, shapes, units
 - `js/render.js`, `js/pdf.js`: SVG and PDF output

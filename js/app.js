@@ -99,6 +99,7 @@
     checkOpen: false,
     highlight: null, // adjusted spacing section to show on the drawing
     adjusted: [],
+    clash: null, // flagged edge hovered in the Stitching section
   };
 
   // ---------------------------------------------------------------------
@@ -157,6 +158,34 @@
     return layCache.lay;
   }
 
+  // Edges without holes that cut through a hole of the pattern, with the
+  // suggested moves; cached like the layout.
+  let clashCache = { key: null, list: [] };
+  function clashes() {
+    const lay = curLay();
+    if (clashCache.key !== layCache.key) clashCache = { key: layCache.key, list: LT.clearance.check(project, piece(), lay) };
+    return clashCache.list;
+  }
+
+  function clashNames(c) {
+    const box = G.bbox(curLay().outline.prims) || { minX: 0, maxX: 0, minY: 0, maxY: 0 };
+    const ref = c.cutRef || '';
+    const cut = ref.startsWith('l:') ? 'The cut line' : ref.startsWith('n:') ? 'The notch' : `The ${edgeName(c.cutPrim, box).toLowerCase()}`;
+    const holed = edgeName(c.holedPrim, box).toLowerCase();
+    return { cut, holed };
+  }
+
+  function moveClash(i, delta) {
+    const c = clashes()[i];
+    if (!c || !delta) return;
+    if (!LT.clearance.moveEnd(piece(), c, delta)) {
+      toast('That edge can’t be moved from here.');
+      return;
+    }
+    commit();
+  }
+
+  // ---------------------------------------------------------------------
   // ---------------------------------------------------------------------
   // References: where the settings of an edge or corner live.
   //   o:<i>  c:<shape>:<i>  n:<notch>[:L|:R|:x]  j:<shape>:<key>
@@ -1042,6 +1071,15 @@
       }
     }
 
+    // Holes an edge without holes would cut through
+    if (!combining) {
+      const hr = curLay().holeRadius;
+      clashes().forEach((c, i) => {
+        out.push(`<circle cx="${num(c.holePt.x)}" cy="${num(-c.holePt.y)}" r="${num(hr)}" fill="color-mix(in srgb, var(--zero) 18%, transparent)" stroke="var(--zero)" stroke-width="${ui.clash === i ? 2.4 : 1.6}" stroke-dasharray="3 2" vector-effect="non-scaling-stroke" pointer-events="none"/>`);
+        out.push(`<circle cx="${num(c.holePt.x)}" cy="${num(-c.holePt.y)}" r="${num(hr + px(7))}" fill="none" stroke="var(--zero)" stroke-width="1" stroke-opacity="${ui.clash === i ? 0.9 : 0.5}" vector-effect="non-scaling-stroke" pointer-events="none"/>`);
+      });
+    }
+
     // Highlighted spacing section
     if (ui.highlight && ui.adjusted[ui.highlight - 1]) {
       out.push(`<path d="${sectionPath(ui.adjusted[ui.highlight - 1])}" fill="none" stroke="var(--zero)" stroke-width="6" stroke-opacity="0.45" stroke-linecap="round" pointer-events="none" vector-effect="non-scaling-stroke"/>`);
@@ -1643,6 +1681,23 @@
             ${adj.map((s, i) => `<button class="run ${ui.highlight === i + 1 ? 'on' : ''}" data-run="${i + 1}">${fmt(s.length)} ${units()} run · ${fmt(s.actual)} apart</button>`).join('')}
           </details>`
         : `<div class="ok">${icon('check')} ${holes} holes, all at exactly ${fmt(d.spacing)} ${units()}</div>`;
+    const clashHtml = clashes()
+      .map((c, i) => {
+        const n = clashNames(c);
+        const fixes = c.fixes
+          .map((d) => `<button class="small" data-clashfix="${i}" data-delta="${d}">${fmt(Math.abs(d))} ${units()} ${d > 0 ? 'longer' : 'shorter'}</button>`)
+          .join('');
+        const move = c.movable
+          ? `<div class="clash-h">Make the ${esc(n.holed)}</div>
+            ${fixes ? `<div class="clash-fixes">${fixes}</div>` : ''}
+            <div class="clash-manual">${numInput(`data-clashamt="${i}" aria-label="Distance to move the edge"`, '')}<button class="small" data-clashmove="${i}" data-sign="1">Longer</button><button class="small" data-clashmove="${i}" data-sign="-1">Shorter</button></div>`
+          : '<p class="note">Move this edge yourself to clear the hole.</p>';
+        return `<div class="clash ${ui.clash === i ? 'on' : ''}" data-clash="${i}">
+          <p><b>${esc(n.cut)} cuts through a hole.</b> The holes on the ${esc(n.holed)} carry on at ${fmt(d.spacing)} ${units()}, and the next one would be cut by this edge.</p>
+          ${move}
+        </div>`;
+      })
+      .join('');
     const originRows = origins
       .map((o) => `<div class="origin-row"><span><b>${esc(o.label)}</b> <span class="muted">${o.set ? originLabel(o.lay.origin) : 'Not set'}</span></span>
           ${o.set ? `<button class="icon-btn" data-clear-origin="${esc(o.key)}" title="Remove" aria-label="Remove origin">${icon('x')}</button>` : ''}</div>`)
@@ -1653,6 +1708,7 @@
         <div class="grid2">${settingsFields(d)}</div>
         <div class="sub-h">Hole count</div>
         ${check}
+        ${clashHtml}
         <div class="sub-h">Origin point</div>
         ${originRows}
         <button class="small ${ui.tool === 'origin' ? 'primary' : ''}" data-tool-start="origin">${icon('target')} ${ui.tool === 'origin' ? 'Click a hole or stitch line…' : 'Place origin point'}</button>
@@ -1727,6 +1783,22 @@
       renderCanvas();
       return;
     }
+    if (t.dataset.clashfix !== undefined) {
+      moveClash(Number(t.dataset.clashfix), Number(t.dataset.delta));
+      return;
+    }
+    if (t.dataset.clashmove !== undefined) {
+      const i = t.dataset.clashmove;
+      const inp = $(`[data-clashamt="${i}"]`);
+      const v = inp ? M.parseLength(inp.value, units()) : NaN;
+      if (!Number.isFinite(v) || v <= 0) {
+        if (inp) inp.classList.add('bad');
+        toast('Type how far to move it.');
+        return;
+      }
+      moveClash(Number(i), v * Number(t.dataset.sign));
+      return;
+    }
     if (t.dataset.clearOrigin) {
       const k = t.dataset.clearOrigin;
       if (k === 'outline') delete piece().outline.origin;
@@ -1742,6 +1814,16 @@
       return;
     }
     if (t.dataset.piece !== undefined) selectPiece(Number(t.dataset.piece));
+  });
+
+  // Hovering a flagged edge in the list rings its hole on the drawing.
+  $('#leftPanel').addEventListener('mouseover', (e) => {
+    const el = e.target.closest('[data-clash]');
+    const k = el ? Number(el.dataset.clash) : null;
+    if (k === (ui.clash ?? null)) return;
+    ui.clash = k;
+    $$('[data-clash]').forEach((x) => x.classList.toggle('on', Number(x.dataset.clash) === k));
+    renderCanvas();
   });
 
   function parseInto(t, assign, positive = false) {

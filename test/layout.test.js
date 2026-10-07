@@ -60,19 +60,54 @@ test('deselected corner gets no forced hole', () => {
   assert.ok(near(sec.actual, L / n));
 });
 
-test('only selected edges get holes; run ends follow corner flags', () => {
-  const c = model.rectangle(100, 50);
+test('only selected edges get holes; open ends keep the exact spacing', () => {
+  const c = model.rectangle(98, 50);
   c.segments[0].mode = 'holes'; // bottom edge only
   const r = layout.layoutContour(c, settings, { isOutline: true });
   assert.ok(r.holes.every((p) => near(p.y, 4)));
-  assert.ok(hasPoint(r.holes, 4, 4));
-  assert.ok(hasPoint(r.holes, 96, 4));
-  // Turn off the corner at the end of the run: last hole is inset by half a spacing.
-  c.segments[1].corner = false;
-  const r2 = layout.layoutContour(c, settings, { isOutline: true });
-  const xs = r2.holes.map((p) => p.x).sort((a, b) => a - b);
+  // Starts at the corner, then exactly 4 mm apart, carrying on past the
+  // usual edge distance up to the edge without holes (hole at 96 still
+  // leaves 1 mm of leather before x = 98).
+  const xs = r.holes.map((p) => p.x).sort((a, b) => a - b);
   assert.ok(near(xs[0], 4));
-  assert.ok(xs[xs.length - 1] <= 96 - 2 + 1e-6);
+  gaps(r.holes.slice().sort((a, b) => a.x - b.x)).forEach((g) => assert.ok(near(g, 4)));
+  assert.ok(near(xs[xs.length - 1], 96));
+  assert.ok(!r.openEnds[0].conflict);
+  // Start corner hole off: the pattern starts half a spacing in.
+  c.segments[0].corner = false;
+  const r2 = layout.layoutContour(c, settings, { isOutline: true });
+  const xs2 = r2.holes.map((p) => p.x).sort((a, b) => a - b);
+  assert.ok(near(xs2[0], 6));
+  assert.ok(near(xs2[xs2.length - 1], 94));
+  assert.ok(r2.openEnds[0].conflict); // the next one, at 98, sits on the edge
+});
+
+test('open ends run on from the origin at exact spacing', () => {
+  const c = model.rectangle(100, 50);
+  c.segments[0].mode = 'holes';
+  const r = layout.layoutContour(c, settings, { isOutline: true, origin: { x: 50.5, y: 0 } });
+  const xs = r.holes.map((p) => p.x).sort((a, b) => a - b);
+  assert.ok(xs.some((x) => near(x, 50.5)));
+  assert.ok(near(xs[0], 2.5));
+  assert.ok(near(xs[xs.length - 1], 98.5));
+  gaps(r.holes.slice().sort((a, b) => a.x - b.x)).forEach((g) => assert.ok(near(g, 4)));
+  // Both ends are free, neither cuts a hole here.
+  assert.equal(r.openEnds.length, 2);
+  assert.ok(r.openEnds.every((e) => !e.conflict));
+});
+
+test('an edge without holes that crosses the next hole is flagged', () => {
+  const c = model.rectangle(100, 50);
+  c.segments[0].mode = 'holes';
+  const r = layout.layoutContour(c, settings, { isOutline: true });
+  // The pattern start is pinned, so only the far end is checked.
+  assert.equal(r.openEnds.length, 1);
+  const e = r.openEnds[0];
+  assert.equal(e.which, 'end');
+  assert.ok(e.conflict); // next hole would be at x = 100, on the edge
+  assert.ok(hasPoint([e.holePt], 100, 4, 1e-6));
+  // Nearest clear spots: the hole plus 0.5 mm of leather, either side.
+  assert.deepEqual(e.targets.map((t) => Math.round(t * 100) / 100).sort(), [94.49, 97.51]);
 });
 
 test('circle: holes evenly spaced on the inset circle', () => {

@@ -212,14 +212,14 @@
           if (rows * cols > 1) {
             cv.text(MARGIN.left, MARGIN.bottom - 24, 8, 'Trim on the dashed border and line up the + marks with the neighbouring pages.');
           }
-          // Scale check square
-          const inch = project.units === 'in';
-          const sq = inch ? 25.4 : 25;
+          // Scale check square: 20 mm in either unit setting.
+          const sq = 20;
           const sx = paper.w - MARGIN.right - sq;
           const sy = 4;
           cv.lineWidth(0.2);
           cv.rect(sx, sy, sq, sq);
-          cv.text(sx + 2, sy + sq / 2 - 1, 7, inch ? 'Should be 1 in' : 'Should be 25 mm');
+          cv.text(sx + 2, sy + sq / 2 + 1, 7, 'Should be');
+          cv.text(sx + 2, sy + sq / 2 - 3, 7, '20 mm');
           pages.push({ w: paper.w * PT, h: paper.h * PT, content: cv.toString() });
         }
       }

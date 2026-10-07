@@ -452,7 +452,7 @@
   function moveCorners(c, moveFn) {
     const edges = G.buildEdges(c);
     if (!edges.length) return;
-    const pts = edges.map((e) => moveFn(G.primStart(e)));
+    const pts = edges.map((e, k) => moveFn(G.primStart(e), k));
     edges.forEach((e, k) => {
       if (e.closing) return;
       const sg = c.segments[e.edge];
@@ -472,6 +472,16 @@
       }
     });
     c.start = { x: r4(pts[0].x), y: r4(pts[0].y) };
+  }
+
+  // Slide edge i of contour c by vector v, keeping its neighbours joined.
+  function shiftEdge(c, i, v) {
+    const edges = G.buildEdges(c);
+    const k = edges.findIndex((e) => e.edge === i);
+    if (k < 0) return false;
+    const k1 = (k + 1) % edges.length;
+    moveCorners(c, (p, j) => (j === k || j === k1 ? G.add(p, v) : p));
+    return true;
   }
 
   // Resize contour c to w x h. anchor 'topleft' keeps the left and top
@@ -559,5 +569,5 @@
     });
   }
 
-  LT.resolve = { resolvePiece, lineChord, ccwTagged, primsToContour, notchSegments, notchPlace, OPS, isCircle, rawBox, resizeContour, resizePiece, resizeShape };
+  LT.resolve = { resolvePiece, lineChord, ccwTagged, primsToContour, notchSegments, notchPlace, OPS, isCircle, rawBox, resizeContour, resizePiece, resizeShape, shiftEdge };
 })(typeof window !== 'undefined' ? window : globalThis);
