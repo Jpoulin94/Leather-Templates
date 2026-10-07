@@ -117,9 +117,12 @@
   // ---------------------------------------------------------------------
   // Sides that don't divide evenly. Spacing never stretches, so between two
   // holes that are pinned (corner holes, origins, path ends) whatever is
-  // left over shows as one short gap. Two kinds of fix make the side a
-  // whole number of spacings long: move the outline (or the path point),
-  // or move the holes on the next edge nearer to or further from its edge.
+  // left over shows as one short gap. Three ways out, keeping the holes the
+  // same distance from every edge:
+  //   remove    take out the hole at the corner where the short gap is
+  //   outline   make the side longer (slide the edge across the corner, or
+  //             move the stitch path's point)
+  //   distance  a shorter holes-from-edge for the whole project
 
   const segOf = (contour, i) => (i < contour.segments.length ? contour.segments[i] : contour.closing) || {};
 
@@ -150,9 +153,10 @@
           own = o ? { ref: segOf(c.contour, o.edge).ref || null, prim: o } : null;
           across = a ? { ref: segOf(c.contour, a.edge).ref || null, prim: a } : null;
         }
-        const vref = v !== null && v !== undefined ? segOf(c.contour, v).vref || `v${v}` : 'none';
+        const vref = v !== null && v !== undefined ? segOf(c.contour, v).vref || null : null;
         out.push({
-          id: `${where}|${vref}|${sec.oddEnd}`,
+          id: `${where}|${vref || (v === null || v === undefined ? 'none' : `v${v}`)}|${sec.oddEnd}`,
+          vref,
           where,
           isPath: c.kind === 'path',
           section: sec,
@@ -170,12 +174,18 @@
     return out;
   }
 
-  // Change the piece by `amount` for one kind of fix. Mutates the piece.
+  // Change the piece for one kind of fix. Mutates the piece.
+  //   'remove'   take out the hole at the short gap's corner
   //   'outline'  slide the edge across the corner by amount mm, making the
   //              side longer (positive) or shorter
   //   'point'    the same for a stitch path: move its point at the corner
-  //   'distance' set the edge across the corner's holes-from-edge to amount
+  // (A new holes-from-edge is a project setting: see `distanceFixes`.)
   function applyFix(piece, u, kind, amount) {
+    if (kind === 'remove') {
+      if (!u.vref) return false;
+      piece.skipHoles = [...new Set([...(piece.skipHoles || []), u.vref])];
+      return true;
+    }
     if (kind === 'point') {
       const path = (piece.paths || []).find((p) => p.id === u.where);
       if (!path || u.vertex === null) return false;
@@ -184,43 +194,19 @@
       LT.model.mapOrigins(path, (o) => o);
       return true;
     }
-    if (!u.across || !u.across.ref) return false;
     if (kind === 'outline') {
+      if (!u.across || !u.across.ref) return false;
       const corner = u.across.prim ? (u.section.oddEnd === 'to' ? G.primStart(u.across.prim) : G.primEnd(u.across.prim)) : u.pt;
       return moveEnd(piece, { cutRef: u.across.ref, dir: u.dir, corner }, amount);
-    }
-    if (kind === 'distance') {
-      const t = edgeTarget(piece, u.across.ref);
-      if (!t) return false;
-      t.edgeDist = Math.round(amount * 1000) / 1000;
-      return true;
     }
     return false;
   }
 
-  // The segment (or line) that holds an edge's own settings.
-  function edgeTarget(piece, ref) {
-    let m = (ref || '').match(/^o:(\d+)$/);
-    if (m) return segOf(piece.outline, Number(m[1]));
-    m = (ref || '').match(/^c:(.+):(\d+)$/);
-    if (m) {
-      const sh = (piece.cutouts || []).find((c) => c.id === m[1]);
-      return sh ? segOf(sh, Number(m[2])) : null;
-    }
-    m = (ref || '').match(/^l:([^:]+)$/);
-    if (m) return (piece.lines || []).find((l) => l.id === m[1]) || null;
-    return null;
-  }
-
-  function sectionAfter(project, piece, u, kind, amount) {
-    const pc = clone(piece);
-    if (!applyFix(pc, u, kind, amount)) return null;
-    const lay = LT.layout.layoutPiece(project, pc);
-    const all = unevenOf(lay);
-    const same = all.find((x) => x.id === u.id);
+  // The same section in another layout of the piece: its length, and
+  // whether it now divides evenly.
+  function sectionIn(lay, u) {
+    const same = unevenOf(lay).find((x) => x.id === u.id);
     if (same) return { length: same.length, even: false };
-    // Even now: find the section that ends at the same corner to read its
-    // length.
     let found = null;
     LT.layout.allOf(lay).forEach((c, i) => {
       const where = c.kind === 'path' ? c.src : whereOf(c, i);
@@ -230,6 +216,15 @@
       });
     });
     return found ? { length: found.length, even: !found.uneven } : null;
+  }
+
+  const withDistance = (project, e) => ({ ...project, defaults: { ...project.defaults, edgeDistance: e } });
+
+  function sectionAfter(project, piece, u, kind, amount) {
+    if (kind === 'distance') return sectionIn(LT.layout.layoutPiece(withDistance(project, amount), piece), u);
+    const pc = clone(piece);
+    if (!applyFix(pc, u, kind, amount)) return null;
+    return sectionIn(LT.layout.layoutPiece(project, pc), u);
   }
 
   // Secant steps to make the section `target` long.
@@ -251,34 +246,51 @@
   }
 
   const r2 = (v) => Math.round(v * 100) / 100;
+  const MIN_DISTANCE = 0.5; // mm: the least holes-from-edge offered
+
+  // Shorter holes-from-edge values (for every edge of the project) that
+  // even out side `u`, nearest first, stopping at the first that evens out
+  // every side of the piece. `left`: sides of this piece still uneven.
+  function distanceFixes(project, piece, u) {
+    if (u.isPath) return [];
+    const s = project.defaults.spacing;
+    const cur = project.defaults.edgeDistance;
+    const out = [];
+    for (let k = 1; k <= 40; k++) {
+      const target = Math.floor(u.length / s + 1e-9) * s + k * s;
+      const e = solveFix(project, piece, u, 'distance', cur, target);
+      if (e === null) continue;
+      if (e < MIN_DISTANCE) break;
+      if (e >= cur - 1e-6) continue;
+      const amount = Math.round(e * 1000) / 1000;
+      const lay = LT.layout.layoutPiece(withDistance(project, amount), piece);
+      if (unevenOf(lay).some((x) => x.id === u.id)) continue;
+      const left = unevenOf(lay).filter((x) => !x.isPath).length;
+      if (!out.length || !left) out.push({ amount, kind: 'distance', left });
+      if (!left) break;
+    }
+    return out;
+  }
 
   // Uneven sides with their fixes:
-  //   outline: [{ amount }]   slide the edge (or path point), +longer
-  //   distance: [{ amount }]  new holes-from-edge for the edge across
+  //   remove: true             the corner hole can be taken out
+  //   outline: [{ amount }]    make the side (or leg) this much longer
+  //   distance: [{ amount, left }]  a shorter holes-from-edge
   function uneven(project, piece, lay) {
     lay = lay || LT.layout.layoutPiece(project, piece);
     const s = project.defaults.spacing;
     return unevenOf(lay).map((u) => {
-      const lo = Math.floor(u.length / s) * s;
-      const targets = [lo, lo + s].filter((t) => t > 1e-6).sort((a, b) => Math.abs(a - u.length) - Math.abs(b - u.length));
-      const fix = { outline: [], distance: [] };
+      const fix = { remove: !!u.vref && (u.oddKind === 'corner' || u.oddKind === 'end'), outline: [], distance: [] };
       const moveKind = u.isPath ? 'point' : 'outline';
       if (u.isPath ? u.vertex !== null : u.across && movable(u.across.ref)) {
-        targets.forEach((t) => {
-          const d = solveFix(project, piece, u, moveKind, 0, t);
-          if (d !== null) fix.outline.push({ amount: r2(d), kind: moveKind });
-        });
+        const t = Math.floor(u.length / s + 1e-9) * s + s;
+        const d = solveFix(project, piece, u, moveKind, 0, t);
+        if (d !== null && d > 0) fix.outline.push({ amount: r2(d), kind: moveKind });
       }
-      if (!u.isPath && u.across && edgeTarget(piece, u.across.ref)) {
-        const cur = u.across.prim && u.across.prim.edgeDist !== null && u.across.prim.edgeDist !== undefined ? u.across.prim.edgeDist : project.defaults.edgeDistance;
-        targets.forEach((t) => {
-          const d = solveFix(project, piece, u, 'distance', cur, t);
-          if (d !== null && d >= 0) fix.distance.push({ amount: r2(d), kind: 'distance', closer: d < project.defaults.edgeDistance - 1e-6 });
-        });
-      }
+      fix.distance = distanceFixes(project, piece, u);
       return { ...u, fix };
     });
   }
 
-  LT.clearance = { movable, endsOf, moveEnd, solve, check, unevenOf, uneven, applyFix, edgeTarget };
+  LT.clearance = { movable, endsOf, moveEnd, solve, check, unevenOf, uneven, applyFix, distanceFixes };
 })(typeof window !== 'undefined' ? window : globalThis);

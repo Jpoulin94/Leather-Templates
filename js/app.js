@@ -1164,6 +1164,9 @@
       lc.holes.forEach((hp) => {
         out.push(`<circle cx="${num(hp.x)}" cy="${num(-hp.y)}" r="${num(lay.holeRadius)}" fill="color-mix(in srgb, var(--edge-holes) 16%, var(--canvas))" stroke="var(--edge-holes)" stroke-width="1.2" vector-effect="non-scaling-stroke"/>`);
       });
+      (lc.removed || []).forEach((h) => {
+        out.push(`<circle cx="${num(h.pt.x)}" cy="${num(-h.pt.y)}" r="${num(lay.holeRadius)}" fill="none" stroke="var(--edge-holes)" stroke-width="1" stroke-dasharray="2 2" stroke-opacity="0.7" vector-effect="non-scaling-stroke" pointer-events="none"><title>Hole removed to keep the spacing exact</title></circle>`);
+      });
       if (!combining && ui.tool === 'select') {
         lc.prims.forEach((p) => {
           const ref = refOf(lc, p);
@@ -1212,6 +1215,9 @@
         out.push(`<path d="${d}" fill="none" stroke="var(--edge-${lc.prims.some((p) => p.mode === 'stitch') ? 'stitch' : 'holes'})" stroke-width="1" stroke-opacity="0.45" stroke-dasharray="1 3" vector-effect="non-scaling-stroke" pointer-events="none"/>`);
         lc.stitch.forEach((st) => out.push(`<path d="${R.pathData(st.prims, flip, st.closed)}" fill="none" stroke="var(--edge-stitch)" stroke-width="1.4" stroke-dasharray="5 3" vector-effect="non-scaling-stroke" pointer-events="none"/>`));
         lc.holes.forEach((hp) => out.push(`<circle cx="${num(hp.x)}" cy="${num(-hp.y)}" r="${num(lay.holeRadius)}" fill="color-mix(in srgb, var(--edge-holes) 16%, var(--canvas))" stroke="var(--edge-holes)" stroke-width="1.2" vector-effect="non-scaling-stroke" pointer-events="none"/>`));
+        (lc.removed || []).forEach((h) => {
+          out.push(`<circle cx="${num(h.pt.x)}" cy="${num(-h.pt.y)}" r="${num(lay.holeRadius)}" fill="none" stroke="var(--edge-holes)" stroke-width="1" stroke-dasharray="2 2" stroke-opacity="0.7" vector-effect="non-scaling-stroke" pointer-events="none"><title>Hole removed to keep the spacing exact</title></circle>`);
+        });
         if (ui.tool === 'select') out.push(`<path class="hit" d="${d}" fill="none" stroke="transparent" stroke-width="14" stroke-linecap="round" vector-effect="non-scaling-stroke" data-path="${lc.src}"><title>Stitch path ${pathNo(lc.src)}</title></path>`);
       });
     }
@@ -1870,20 +1876,28 @@
     const unevenHtml = ul
       .map((u, i) => {
         const n = unevenNames(u);
-        const btn = (f, label) => `<button class="small${f.closer ? ' warnbtn' : ''}" data-unevenfix="${i}" data-kind="${f.kind}" data-amount="${f.amount}">${label}</button>`;
+        const btn = (f, label, title) => `<button class="small" data-unevenfix="${i}" data-kind="${f.kind}" data-amount="${f.amount ?? 0}"${title ? ` title="${esc(title)}"` : ''}>${label}</button>`;
         const what = n.leg ? 'this leg' : n.side.toLowerCase().startsWith('shape') ? 'this side' : `the ${n.side.toLowerCase()}`;
-        const moves = u.fix.outline.map((f) => btn(f, `${fmt(Math.abs(f.amount))} ${units()} ${f.amount > 0 ? 'longer' : 'shorter'}`)).join('');
-        const dists = u.fix.distance.map((f) => btn(f, `${fmt(f.amount)} ${units()} from edge${f.closer ? ' (closer)' : ''}`)).join('');
+        const end = u.isPath ? 'end or bend' : 'corner';
+        const remove = u.fix.remove ? btn({ kind: 'remove' }, `Remove the ${end} hole`, `Every gap stays ${fmt(d.spacing)} ${units()}; that ${end} gets no hole.`) : '';
+        const grow = u.fix.outline.map((f) => btn(f, `Make ${esc(what)} ${fmt(f.amount)} ${units()} longer`)).join('');
+        const dists = u.fix.distance
+          .map((f) => btn(f, `${fmt(f.amount)} ${units()} from edge${f.left ? ` (${f.left} side${f.left === 1 ? '' : 's'} still uneven)` : ''}`))
+          .join('');
         const between = u.oddKind === 'origin' ? 'origin' : u.isPath ? 'bend or end' : 'corner hole';
+        const choice = (title, body) => `<div class="clash-h">${title}</div>${body}`;
         return `<div class="clash uneven ${ui.unevenHover === i || ui.highlight === i + 1 ? 'on' : ''}" data-uneven="${i}">
           <p><b>${esc(n.side)}: ${fmt(u.gap)} ${units()} short gap.</b> ${fmt(u.length)} ${units()} from hole to ${between} isn’t a whole number of ${fmt(d.spacing)} ${units()} spaces.</p>
-          ${moves ? `<div class="clash-h">Make ${esc(what)}</div><div class="clash-fixes two">${moves}</div>` : ''}
-          ${dists ? `<div class="clash-h">Or put the holes on the ${esc(n.across)}</div><div class="clash-fixes two">${dists}</div>
-            ${u.fix.distance.some((f) => f.closer) ? `<p class="note">“Closer” is nearer the edge than your ${fmt(d.edgeDistance)} ${units()}.</p>` : ''}` : ''}
-          ${!moves && !dists ? '<p class="note">Move one of the origins so they sit a whole number of spaces apart.</p>' : ''}
+          ${choice('Remove one hole', remove ? `<div class="clash-fixes">${remove}</div>` : '<p class="note">There’s no corner hole at this end to take out.</p>')}
+          ${choice('Change dimensions', grow ? `<div class="clash-fixes">${grow}</div>` : '<p class="note">This side can’t be lengthened from here.</p>')}
+          ${u.isPath ? '' : choice('Make distance from edge shorter', dists ? `<div class="clash-fixes">${dists}</div><p class="note">Changes Holes from edge for every edge, so holes stay the same distance from each side.</p>` : `<p class="note">No shorter distance from the edge (down to ${fmt(0.5)} ${units()}) evens out this side.</p>`)}
         </div>`;
       })
       .join('');
+    const removed = all.reduce((k, c) => k + (c.removed || []).length, 0);
+    const removedHtml = removed
+      ? `<div class="note-row"><p class="note">${removed} corner hole${removed === 1 ? '' : 's'} removed to keep the spacing exact (dashed on the drawing). </p><button class="small" data-unskip="all">Put ${removed === 1 ? 'it' : 'them'} back</button></div>`
+      : '';
     const clashHtml = clashes()
       .map((c, i) => {
         const n = clashNames(c);
@@ -1917,6 +1931,7 @@
         <div class="grid2">${settingsFields(d)}</div>
         <div class="sub-h">Hole count</div>
         ${check}
+        ${removedHtml}
         ${unevenHtml}
         ${clashHtml}
         <div class="sub-h">Origin point</div>
@@ -1984,8 +1999,21 @@
       toast('Piece deleted. Undo brings it back.');
       return;
     }
+    if (t.dataset.unskip) {
+      const pc = piece();
+      pc.skipHoles = t.dataset.unskip === 'all' ? [] : (pc.skipHoles || []).filter((v) => !selected('corner').includes(v));
+      commit();
+      return;
+    }
     if (t.dataset.unevenfix !== undefined) {
       const u = unevenSides()[Number(t.dataset.unevenfix)];
+      if (u && t.dataset.kind === 'distance') {
+        project.defaults.edgeDistance = Number(t.dataset.amount);
+        ui.highlight = null;
+        ui.unevenHover = null;
+        commit();
+        return;
+      }
       if (!u || !LT.clearance.applyFix(piece(), u, t.dataset.kind, Number(t.dataset.amount))) {
         toast('That can’t be changed from here.');
         return;
@@ -2258,17 +2286,8 @@
       }
     }
     const wheres = [...new Set(items.map(refWhere))];
-    const dists = items.map((r) => {
-      const t = edgeTarget(r);
-      return t && t.edgeDist !== undefined && t.edgeDist !== null && t.edgeDist !== '' ? Number(t.edgeDist) : null;
-    });
-    const dist = dists.every((x) => x === dists[0]) ? dists[0] : undefined;
-    const ownDist = modes.includes('holes') && items.some((r) => edgeTarget(r))
-      ? `<label class="fld" style="margin-top:10px" title="Leave empty to use the Stitching setting"><span>Holes from this edge</span>${numInput(`data-edgedist="1" placeholder="${fmt(project.defaults.edgeDistance)} (Stitching)"`, dist === undefined || dist === null ? '' : dist)}</label>
-        <p class="note">${dist === undefined ? 'Mixed. ' : ''}Empty uses the Stitching setting (${fmt(project.defaults.edgeDistance)} ${units()}).</p>`
-      : '';
     return `${head('edge', one ? edgeLabel(one) : `${items.length} edges`, `On ${wheres.join(', ')}`)}
-      <div class="card"><h4>Along this edge</h4>${modeSeg(commonValue(modes))}${ownDist}</div>
+      <div class="card"><h4>Along this edge</h4>${modeSeg(commonValue(modes))}</div>
       ${notchBtn}
       ${detail ? `<div class="card"><h4>Size</h4>${detail}</div>` : ''}
       <div class="row"><button class="small" data-selall="edge">Select all outline edges</button><button class="small ghost" data-deselect="1">Done</button></div>`;
@@ -2283,7 +2302,12 @@
     const none = corner.every((x) => !x);
     const one = items.length === 1;
     const wheres = [...new Set(items.map(refWhere))];
+    const skips = items.filter((v) => (piece().skipHoles || []).includes(v)).length;
+    const gone = skips
+      ? `<div class="card"><p class="note">${one ? 'This corner’s hole is' : `${skips} of these corner holes are`} removed so the spacing stays exact.</p><button class="small" data-unskip="sel">Put the hole back</button></div>`
+      : '';
     return `${head('corner', one ? 'Corner' : `${items.length} corners`, `On ${wheres.join(', ')}`)}
+      ${gone}
       <div class="card"><h4>Rounded</h4>${radiusControl(fil, 'sel', true)}</div>
       <div class="card"><label class="switch"><span>Hole on this corner</span><input type="checkbox" id="selCorner" ${all ? 'checked' : ''} ${!all && !none ? 'data-mixed="1"' : ''}></label>
         <p class="note">Rounded corners have no single point, so holes simply follow the curve.</p></div>
@@ -2596,18 +2620,6 @@
     }
     if (t.id === 'pieceName') {
       pc.name = t.value.trim() || pc.name;
-      return commit();
-    }
-    if (t.dataset.edgedist) {
-      const raw = t.value.trim();
-      const v = raw === '' ? null : M.parseLength(raw, units());
-      if (v !== null && (!Number.isFinite(v) || v < 0)) return bad(t);
-      selected('edge').forEach((r) => {
-        const tg = edgeTarget(r);
-        if (!tg) return;
-        if (v === null) delete tg.edgeDist;
-        else tg.edgeDist = v;
-      });
       return commit();
     }
     if (t.dataset.pathleg !== undefined || t.dataset.pathstart || t.id === 'pathClosed') {
