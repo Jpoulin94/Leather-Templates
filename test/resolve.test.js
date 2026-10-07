@@ -116,7 +116,11 @@ test('corner settings survive a live merge', () => {
 test('version 1 projects: zero point becomes the outline origin', () => {
   const old = { name: 'Old', pieces: [{ name: 'A', outline: model.rectangle(100, 60), cutouts: [model.rectangle(10, 10, 0, 20, 20)], zero: { enabled: true, edge: 0, offset: 30 }, customSettings: true, settings: { spacing: 5 } }] };
   const p = model.normalizeProject(old);
-  assert.deepEqual(p.pieces[0].outline.origin, { x: 30, y: 0 });
+  const os = p.pieces[0].outline.origins;
+  assert.equal(os.length, 1);
+  assert.equal(os[0].name, 'A');
+  assert.deepEqual({ x: os[0].x, y: os[0].y }, { x: 30, y: 0 });
+  assert.equal(p.pieces[0].outline.origin, undefined);
   assert.equal(p.pieces[0].cutouts[0].op, 'hole');
   assert.ok(p.pieces[0].cutouts[0].id);
   assert.equal(p.pieces[0].customSettings, undefined);

@@ -27,7 +27,7 @@
     return G.buildEdges(contour).map((e) => {
       const vp = G.vertexProps(contour, e.edge);
       const ref = `${prefix}${e.edge}`;
-      return { ...e, ref, vref: ref, mode: vp.mode, fillet: vp.fillet, corner: vp.corner };
+      return { ...e, ref, vref: ref, mode: vp.mode, edgeDist: vp.edgeDist, fillet: vp.fillet, corner: vp.corner };
     });
   }
 
@@ -120,7 +120,7 @@
         const P1 = at(c + w2);
         const vL = notchVertex(n, 'L');
         if (c - w2 - pos > 1e-6) {
-          out.push({ type: 'line', a: at(pos), b: P0, ref: e.ref, mode: e.mode, ...startV });
+          out.push({ type: 'line', a: at(pos), b: P0, ref: e.ref, mode: e.mode, edgeDist: e.edgeDist, ...startV });
           startV = vL;
         } else if (pos === 0) {
           // The notch starts right at the edge's corner: that corner wins.
@@ -133,14 +133,14 @@
           // A square notch has two real corners at the bottom; a round
           // notch's inner joins are smooth.
           const v = k === 0 ? startV : square ? notchVertex(n, k === 1 ? 'BL' : 'BR') : { vref: `n:${n.id}:x`, fillet: 0, corner: true };
-          out.push({ ...p, ref: `n:${n.id}`, mode: e.mode, ...v });
+          out.push({ ...p, ref: `n:${n.id}`, mode: e.mode, edgeDist: e.edgeDist, ...v });
         });
         const last = out[out.length - 1];
         if (last.type === 'line') last.b = P1;
         pos = c + w2;
         startV = notchVertex(n, 'R');
       });
-      if (L - pos > 1e-6) out.push({ type: 'line', a: at(pos), b: e.b, ref: e.ref, mode: e.mode, ...startV });
+      if (L - pos > 1e-6) out.push({ type: 'line', a: at(pos), b: e.b, ref: e.ref, mode: e.mode, edgeDist: e.edgeDist, ...startV });
     });
     return out;
   }
@@ -323,7 +323,8 @@
     const mode = line.mode || 'none';
     const cA = lineCorner(line, 'a');
     const cB = lineCorner(line, 'b');
-    const edge = (p0, p1, v) => ({ type: 'line', a: p0, b: p1, ref: `l:${line.id}`, mode, ...v });
+    const edgeDist = Number.isFinite(Number(line.edgeDist)) && line.edgeDist !== null ? Number(line.edgeDist) : null;
+    const edge = (p0, p1, v) => ({ type: 'line', a: p0, b: p1, ref: `l:${line.id}`, mode, edgeDist, ...v });
     const withStart = (list, v) => list.map((p, k) => (k === 0 ? { ...p, ...v } : p));
     // Left of a→b: the chord P→Q, then the boundary back from Q to P.
     const left = [edge(ch.P, ch.Q, cA), ...withStart(sp.QP, cB)];
@@ -360,7 +361,7 @@
     const segs = prims.map((p) => {
       const t = G.primStartTangent(p);
       const angle = norm360(G.deg(Math.atan2(t.y, t.x)));
-      const common = { mode: p.mode || 'none', fillet: Number(p.fillet) || 0, corner: p.corner !== false, ref: p.ref, vref: p.vref };
+      const common = { mode: p.mode || 'none', edgeDist: p.edgeDist ?? null, fillet: Number(p.fillet) || 0, corner: p.corner !== false, ref: p.ref, vref: p.vref };
       if (p.type === 'line') return { type: 'line', length: G.dist(p.a, p.b), angle, ...common };
       return { type: 'arc', radius: p.r, sweep: G.deg(p.sweep), angle, ...common };
     });
@@ -383,7 +384,7 @@
       (piece.cutouts || []).forEach((c) => {
         if (!OPS.includes(c.op)) {
           const e = shapeEdges(c);
-          if (e.length) out.cutouts.push({ contour: primsToContour(e), src: c.id, origin: c.origin || null });
+          if (e.length) out.cutouts.push({ contour: primsToContour(e), src: c.id, origins: LT.model.originsOf(c) });
         }
       });
       return out;
@@ -425,9 +426,9 @@
     (piece.cutouts || []).forEach((c) => {
       if (OPS.includes(c.op)) return;
       const e = shapeEdges(c);
-      if (e.length) out.cutouts.push({ contour: primsToContour(e), src: c.id, origin: c.origin || null });
+      if (e.length) out.cutouts.push({ contour: primsToContour(e), src: c.id, origins: LT.model.originsOf(c) });
     });
-    derived.forEach((l) => out.cutouts.push({ contour: primsToContour(l), src: null, origin: null }));
+    derived.forEach((l) => out.cutouts.push({ contour: primsToContour(l), src: null, origins: [] }));
     return out;
   }
 
@@ -529,7 +530,11 @@
     const W = b.maxX - b.minX;
     const H = b.maxY - b.minY;
     const fn = resizeContour(piece.outline, w, h, 'topleft');
-    if (piece.outline.origin) piece.outline.origin = fn(piece.outline.origin);
+    LT.model.mapOrigins(piece.outline, fn);
+    (piece.paths || []).forEach((p) => {
+      p.points = p.points.map(fn);
+      LT.model.mapOrigins(p, fn);
+    });
     const lines = piece.lines || [];
     lines.forEach((l) => {
       if ((l.target || 'outline') !== 'outline') return;
@@ -549,7 +554,7 @@
       const tx = Math.abs(cx - mx) < tolX ? nmx - mx : cx > mx ? nb.maxX - b.maxX : nb.minX - b.minX;
       const ty = Math.abs(cy - my) < tolY ? nmy - my : cy > my ? nb.maxY - b.maxY : nb.minY - b.minY;
       sh.start = { x: r4(sh.start.x + tx), y: r4(sh.start.y + ty) };
-      if (sh.origin) sh.origin = { x: sh.origin.x + tx, y: sh.origin.y + ty };
+      LT.model.mapOrigins(sh, (o) => ({ x: o.x + tx, y: o.y + ty }));
       lines.forEach((l) => {
         if (l.target !== sh.id) return;
         l.a = { x: l.a.x + tx, y: l.a.y + ty };
@@ -561,7 +566,7 @@
   // lines: the piece's cut lines; the ones drawn across this shape follow it.
   function resizeShape(shape, w, h, lines) {
     const fn = resizeContour(shape, w, h, 'centre');
-    if (shape.origin) shape.origin = fn(shape.origin);
+    LT.model.mapOrigins(shape, fn);
     (lines || []).forEach((l) => {
       if (l.target !== shape.id) return;
       l.a = fn(l.a);

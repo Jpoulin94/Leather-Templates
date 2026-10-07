@@ -59,14 +59,17 @@
       const tx = (p) => ({ x: p.x + ox, y: b.maxY - p.y + gap });
       const cut = [];
       const score = [];
-      [lay.outline, ...lay.cutouts].forEach((c) => {
-        cut.push(`<path d="${pathData(c.prims, tx, true)}"/>`);
+      LT.layout.allOf(lay).forEach((c) => {
+        // Stitch paths cut nothing: only their holes and stitching go out.
+        if (c.kind !== 'path') cut.push(`<path d="${pathData(c.prims, tx, true)}"/>`);
         c.holes.forEach((h) => {
           const t = tx(h);
           cut.push(`<circle cx="${n(t.x)}" cy="${n(t.y)}" r="${n(lay.holeRadius)}"/>`);
         });
         c.stitch.forEach((s) => score.push(`<path d="${pathData(s.prims, tx, s.closed)}"/>`));
-        if (c.origin && c.origin.kind === 'stitch') score.push(`<path d="${pathData([LT.layout.originTick(c.origin)], tx, false)}"/>`);
+        (c.origins || []).forEach((o) => {
+          if (o.kind === 'stitch') score.push(`<path d="${pathData([LT.layout.originTick(o)], tx, false)}"/>`);
+        });
       });
       const id = `piece${i + 1}-${String(piece.name).replace(/[^A-Za-z0-9_-]+/g, '-')}`;
       parts.push(

@@ -1105,6 +1105,23 @@ details.check > summary::marker {
 .clash-fixes {
   grid-template-columns: 1fr;
 }
+.clash-fixes.two {
+  grid-template-columns: 1fr 1fr;
+}
+.clash button.warnbtn {
+  border-color: var(--zero);
+  color: var(--zero);
+}
+.origin-row .origin-name {
+  width: 64px;
+  flex: none;
+  font-weight: 600;
+  padding: 3px 6px;
+}
+.origin-row .muted {
+  flex: 1;
+  font-size: 11.5px;
+}
 .clash-manual {
   grid-template-columns: minmax(0, 1.2fr) 1fr 1fr;
   margin-bottom: 0;

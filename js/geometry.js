@@ -116,6 +116,7 @@
       fillet: Number(p.fillet) || 0,
       corner: p.corner !== false,
       mode: p.mode || 'none',
+      edgeDist: Number.isFinite(Number(p.edgeDist)) && p.edgeDist !== null && p.edgeDist !== '' ? Number(p.edgeDist) : null,
     };
   }
 
@@ -303,13 +304,18 @@
     }
     const m = prims.length;
     prims.forEach((p) => {
-      if (p.fillet === undefined) p.mode = vertexProps(contour, p.edge).mode;
+      if (p.fillet !== undefined) return;
+      const vp = vertexProps(contour, p.edge);
+      p.mode = vp.mode;
+      p.edgeDist = vp.edgeDist;
     });
     prims.forEach((p, i) => {
       if (p.fillet === undefined) return;
-      const a = prims[(i - 1 + m) % m].mode;
-      const b = prims[(i + 1) % m].mode;
-      p.mode = a === b ? a : 'none';
+      const A = prims[(i - 1 + m) % m];
+      const B = prims[(i + 1) % m];
+      p.mode = A.mode === B.mode ? A.mode : 'none';
+      p.edgeDist = A.edgeDist === B.edgeDist ? A.edgeDist : Math.max(A.edgeDist ?? -Infinity, B.edgeDist ?? -Infinity);
+      if (!Number.isFinite(p.edgeDist)) p.edgeDist = null;
     });
     return prims;
   }
@@ -399,9 +405,11 @@
   // left of the direction of travel). Sharp corners are joined by extending
   // or trimming neighbours to their intersection; arcs that shrink to
   // nothing are dropped.
-  function offsetPrims(prims, dLeft) {
+  // dLeft: a distance, or a function giving each prim's distance.
+  function offsetPrims(prims, dLeftArg) {
     const out = [];
     prims.forEach((p) => {
+      const dLeft = typeof dLeftArg === 'function' ? dLeftArg(p) : dLeftArg;
       if (p.type === 'line') {
         if (dist(p.a, p.b) < 1e-9) return;
         const n = mul(perpLeft(norm(sub(p.b, p.a))), dLeft);

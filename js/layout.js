@@ -51,28 +51,42 @@
     return Math.acos(Math.max(-1, Math.min(1, G.dot(a, b)))) > SHARP;
   }
 
-  // Positions along one section [s0, s1].
-  function distribute(s0, s1, anchored0, anchored1, spacing) {
-    const length = s1 - s0;
-    const in0 = anchored0 ? 0 : spacing / 2;
-    const in1 = anchored1 ? 0 : spacing / 2;
-    const eff = length - in0 - in1;
-    if (eff < 1e-9) {
-      if (anchored0 && anchored1) return { pos: [s0, s1], actual: length, length };
-      if (anchored0) return { pos: [s0], actual: null, length };
-      if (anchored1) return { pos: [s1], actual: null, length };
-      return { pos: length > 0 ? [s0 + length / 2] : [], actual: null, length };
-    }
-    const n = Math.max(1, Math.round(eff / spacing));
-    const actual = eff / n;
+  const TOL = 0.01; // mm: a gap this close to the spacing counts as exact
+
+  // Holes at exactly `spacing` between two anchors that both get a hole.
+  // The pattern starts from an origin if one end is an origin, otherwise
+  // from the first anchor; whatever is left over shows up as one short
+  // gap at the other end (`gap`, with `uneven` set).
+  function fit(A, B, spacing) {
+    const length = B.s - A.s;
+    const back = B.kind === 'origin' && A.kind !== 'origin';
+    const n = Math.floor((length + TOL) / spacing);
+    let rem = length - n * spacing;
     const pos = [];
-    for (let k = 0; k <= n; k++) pos.push(s0 + in0 + k * actual);
-    return { pos, actual, length };
+    for (let k = 0; k <= n; k++) pos.push(back ? B.s - k * spacing : A.s + k * spacing);
+    if (rem > TOL) pos.push(back ? A.s : B.s);
+    if (rem <= TOL) rem = 0;
+    const odd = back ? A : B;
+    return {
+      pos,
+      length,
+      actual: spacing,
+      gap: rem,
+      uneven: rem > TOL && rem < spacing - TOL,
+      oddEnd: back ? 'from' : 'to',
+      oddKind: odd.kind,
+      oddVertex: odd.kind === 'corner' || odd.kind === 'end' ? odd.v : null,
+    };
   }
 
   // reach: how far holes may run on past each open end ({ start, end }, mm).
-  function layoutRun(run, contour, spacing, originS, reach) {
+  // opts.anchorEnds: both ends of an open run get a hole (stitch paths),
+  // unless an origin is on the run.
+  function layoutRun(run, contour, spacing, origins, reach, opts) {
     reach = reach || { start: 0, end: 0 };
+    opts = opts || {};
+    if (origins === null || origins === undefined) origins = [];
+    else if (!Array.isArray(origins)) origins = [origins];
     const prims = run.prims;
     const cum = [0];
     prims.forEach((p) => cum.push(cum[cum.length - 1] + G.primLength(p)));
@@ -81,62 +95,71 @@
 
     const anchors = [];
     for (let j = 1; j < prims.length; j++) {
-      if (isSharp(prims[j - 1], prims[j]) && corner(prims[j].vStart)) anchors.push(cum[j]);
+      if (isSharp(prims[j - 1], prims[j]) && corner(prims[j].vStart)) anchors.push({ s: cum[j], kind: 'corner', v: prims[j].vStart });
     }
     if (run.closed && isSharp(prims[prims.length - 1], prims[0]) && corner(prims[0].vStart)) {
-      anchors.push(0);
+      anchors.push({ s: 0, kind: 'corner', v: prims[0].vStart });
     }
-    if (originS !== null && originS !== undefined) anchors.push(originS);
-    anchors.sort((a, b) => a - b);
-    const uniq = anchors.filter((a, i) => i === 0 || a - anchors[i - 1] > 1e-6);
+    origins.forEach((o) => anchors.push({ s: o, kind: 'origin' }));
+    if (!run.closed && opts.anchorEnds && !origins.length) {
+      anchors.push({ s: 0, kind: 'end', v: prims[0].vStart }, { s: L, kind: 'end', v: prims[prims.length - 1].vEnd });
+    }
+    anchors.sort((a, b) => a.s - b.s);
+    // An origin on a corner is still that corner's hole; keep the origin.
+    const uniq = [];
+    anchors.forEach((a) => {
+      const last = uniq[uniq.length - 1];
+      if (last && a.s - last.s < 1e-6) {
+        if (a.kind === 'origin') uniq[uniq.length - 1] = { ...last, kind: 'origin' };
+      } else uniq.push(a);
+    });
 
     const sections = [];
     const fixed = { start: true, end: true };
     const pinned = { start: 0, end: L }; // pattern anchor nearest each end
     let positions = [];
+    const section = (A, B, closed) => {
+      const r = fit(A, B, spacing);
+      sections.push({ ...r, from: A.s, to: B.s, path: prims, closed });
+      return r.pos;
+    };
     if (run.closed) {
-      if (!uniq.length) uniq.push(0);
+      if (!uniq.length) uniq.push({ s: 0, kind: 'start' });
       uniq.forEach((a, i) => {
-        const b = i + 1 < uniq.length ? uniq[i + 1] : uniq[0] + L;
-        const r = distribute(a, b, true, true, spacing);
-        sections.push({ ...r, from: a, to: b, path: prims, closed: true });
-        positions = positions.concat(r.pos.slice(0, -1)); // end = next anchor
+        const b = i + 1 < uniq.length ? uniq[i + 1] : { ...uniq[0], s: uniq[0].s + L };
+        positions = positions.concat(section(a, b, true));
       });
-      positions = positions.map((s) => ((s % L) + L) % L);
+      positions = positions.map((x) => ((x % L) + L) % L);
     } else {
       // Open ends: exact spacing outward from the nearest anchor.
-      const inner = uniq.filter((a) => a > -1e-6 && a < L + 1e-6);
+      const inner = uniq.filter((a) => a.s > -1e-6 && a.s < L + 1e-6);
       // No anchors: the pattern starts at the run's start (inset by half a
       // spacing when that corner's hole is switched off).
-      if (!inner.length) inner.push(Math.min(L, corner(prims[0].vStart) ? 0 : spacing / 2));
+      if (!inner.length) inner.push({ s: Math.min(L, corner(prims[0].vStart) ? 0 : spacing / 2), kind: 'start' });
       // An end where the pattern is pinned is never checked for clearance.
-      fixed.start = !uniq.length || inner[0] < 1e-6;
-      fixed.end = inner[inner.length - 1] > L - 1e-6;
-      pinned.start = inner[0];
-      pinned.end = inner[inner.length - 1];
-      const first = inner[0];
-      const last = inner[inner.length - 1];
+      fixed.start = !uniq.length || inner[0].s < 1e-6;
+      fixed.end = inner[inner.length - 1].s > L - 1e-6;
+      pinned.start = inner[0].s;
+      pinned.end = inner[inner.length - 1].s;
+      const first = inner[0].s;
+      const last = inner[inner.length - 1].s;
       const exact = (from, to, dir) => {
         const pos = [];
-        for (let s = from; dir > 0 ? s <= to + 1e-6 : s >= to - 1e-6; s += dir * spacing) pos.push(s);
+        for (let x = from; dir > 0 ? x <= to + 1e-6 : x >= to - 1e-6; x += dir * spacing) pos.push(x);
         return pos;
       };
       if (!fixed.start) {
         positions = positions.concat(exact(first, -reach.start, -1));
-        if (first > 1e-6) sections.push({ pos: [], actual: spacing, length: first, from: 0, to: first, path: prims, closed: false });
+        if (first > 1e-6) sections.push({ pos: [], actual: spacing, gap: 0, uneven: false, length: first, from: 0, to: first, path: prims, closed: false });
       }
-      for (let i = 0; i + 1 < inner.length; i++) {
-        const r = distribute(inner[i], inner[i + 1], true, true, spacing);
-        sections.push({ ...r, from: inner[i], to: inner[i + 1], path: prims, closed: false });
-        positions = positions.concat(r.pos);
-      }
+      for (let i = 0; i + 1 < inner.length; i++) positions = positions.concat(section(inner[i], inner[i + 1], false));
       positions = positions.concat(exact(last, fixed.end ? L : L + reach.end, 1));
-      if (L - last > 1e-6) sections.push({ pos: [], actual: spacing, length: L - last, from: last, to: L, path: prims, closed: false });
+      if (L - last > 1e-6) sections.push({ pos: [], actual: spacing, gap: 0, uneven: false, length: L - last, from: last, to: L, path: prims, closed: false });
     }
     positions.sort((a, b) => a - b);
-    const dedup = positions.filter((s, i) => i === 0 || s - positions[i - 1] > 1e-6);
+    const dedup = positions.filter((x, i) => i === 0 || x - positions[i - 1] > 1e-6);
     if (run.closed && dedup.length > 1 && L - dedup[dedup.length - 1] + dedup[0] < 1e-6) dedup.pop();
-    return { points: dedup.map((s) => pointAt(prims, L, s)), positions: dedup, sections, path: prims, length: L, fixed, pinned };
+    return { points: dedup.map((x) => pointAt(prims, L, x)), positions: dedup, sections, path: prims, length: L, fixed, pinned };
   }
 
   // A point along a run, carrying straight on past either end.
@@ -244,47 +267,54 @@
   // with a short tick across the line.
   function layoutContour(contour, settings, opts) {
     const prims = G.buildPrimitives(contour);
-    const res = { contour, prims, holes: [], holePaths: [], stitch: [], sections: [], origin: null, openEnds: [] };
+    const res = { contour, prims, holes: [], holePaths: [], stitch: [], sections: [], origin: null, origins: [], openEnds: [] };
     if (!prims.length) return res;
     const ccw = G.signedArea(prims) > 0;
     const side = opts.isOutline === ccw ? 1 : -1; // +1: material is on the left
 
     let holeRuns = [];
     if (prims.some((p) => p.mode === 'holes') && settings.spacing > 0) {
-      const d = settings.edgeDistance + settings.holeDiameter / 2;
-      holeRuns = findRuns(G.offsetPrims(prims, side * d), 'holes');
+      // Each edge can have its own distance from the edge to its holes.
+      const d = opts.path ? 0 : (p) => side * ((p.edgeDist ?? settings.edgeDistance) + settings.holeDiameter / 2);
+      holeRuns = findRuns(G.offsetPrims(prims, d), 'holes');
     }
     if (prims.some((p) => p.mode === 'stitch')) {
-      res.stitch = findRuns(G.offsetPrims(prims, side * settings.stitchOffset), 'stitch');
+      res.stitch = findRuns(G.offsetPrims(prims, opts.path ? 0 : side * settings.stitchOffset), 'stitch');
     }
 
-    let best = null;
-    if (opts.origin) {
-      const consider = (run, kind, i) => {
-        const n = G.nearestOnPath(run.prims, opts.origin);
-        if (n && (!best || n.d < best.d)) best = { ...n, kind, i };
-      };
-      holeRuns.forEach((r, i) => consider(r, 'hole', i));
-      res.stitch.forEach((r, i) => consider(r, 'stitch', i));
-    }
+    // Origins snap to the nearest hole run or stitch line of the contour.
+    const list = opts.origins || (opts.origin ? [{ ...opts.origin, id: 'origin', name: '' }] : []);
+    const snapped = list
+      .map((o) => {
+        let best = null;
+        const consider = (run, kind, i) => {
+          const n = G.nearestOnPath(run.prims, o);
+          if (n && (!best || n.d < best.d)) best = { ...n, kind, i };
+        };
+        holeRuns.forEach((r, i) => consider(r, 'hole', i));
+        res.stitch.forEach((r, i) => consider(r, 'stitch', i));
+        return best && { ...best, id: o.id, name: o.name || '' };
+      })
+      .filter(Boolean);
 
     holeRuns.forEach((run, i) => {
-      const s = best && best.kind === 'hole' && best.i === i ? best.s : null;
-      const info = endInfo(run, prims, settings.holeDiameter / 2);
+      const os = snapped.filter((b) => b.kind === 'hole' && b.i === i).map((b) => b.s);
+      const info = opts.path ? { start: null, end: null } : endInfo(run, prims, settings.holeDiameter / 2);
       const reach = { start: info.start ? info.start.reach : 0, end: info.end ? info.end.reach : 0 };
-      const r = layoutRun(run, contour, settings.spacing, s, reach);
+      const r = layoutRun(run, contour, settings.spacing, os, reach, { anchorEnds: !!opts.path });
       res.holes = res.holes.concat(r.points);
       res.holePaths.push({ prims: r.path, closed: run.closed });
       res.openEnds = res.openEnds.concat(openEnds(run, r, info, contour, settings.spacing));
       r.sections.forEach((sec) => res.sections.push({ ...sec, requested: settings.spacing }));
     });
 
-    if (best) {
-      const run = best.kind === 'hole' ? holeRuns[best.i] : res.stitch[best.i];
-      const ahead = G.pathPointAt(run.prims, Math.min(G.pathLength(run.prims), best.s + 0.01));
-      const behind = G.pathPointAt(run.prims, Math.max(0, best.s - 0.01));
-      res.origin = { kind: best.kind, pt: G.pathPointAt(run.prims, best.s), tangent: G.norm(G.sub(ahead, behind)) };
-    }
+    res.origins = snapped.map((b) => {
+      const run = b.kind === 'hole' ? holeRuns[b.i] : res.stitch[b.i];
+      const ahead = G.pathPointAt(run.prims, Math.min(G.pathLength(run.prims), b.s + 0.01));
+      const behind = G.pathPointAt(run.prims, Math.max(0, b.s - 0.01));
+      return { id: b.id, name: b.name, kind: b.kind, pt: G.pathPointAt(run.prims, b.s), tangent: G.norm(G.sub(ahead, behind)) };
+    });
+    res.origin = res.origins[0] || null;
     return res;
   }
 
@@ -292,21 +322,60 @@
     return { ...project.defaults };
   }
 
+  // A stitch path as a contour: one edge per leg, plus a closing edge that
+  // carries nothing when the path is open.
+  function pathContour(path) {
+    const pts = path.points || [];
+    const n = pts.length;
+    const corner = (k) => ({ fillet: 0, corner: true, ...((path.corners || {})[k] || {}) });
+    const segments = [];
+    for (let k = 0; k + 1 < n; k++) {
+      const d = G.sub(pts[k + 1], pts[k]);
+      const c = corner(k);
+      segments.push({
+        type: 'line',
+        length: G.len(d),
+        angle: ((G.deg(Math.atan2(d.y, d.x)) % 360) + 360) % 360,
+        mode: path.mode || 'holes',
+        fillet: !path.closed && k === 0 ? 0 : Number(c.fillet) || 0,
+        corner: c.corner !== false,
+        ref: `p:${path.id}:${k}`,
+        vref: `p:${path.id}:${k}`,
+      });
+    }
+    const last = corner(n - 1);
+    const closing = path.closed
+      ? { mode: path.mode || 'holes', fillet: Number(last.fillet) || 0, corner: last.corner !== false, ref: `p:${path.id}:${n - 1}`, vref: `p:${path.id}:${n - 1}` }
+      : { mode: 'none', fillet: 0, corner: true };
+    return { start: n ? { x: pts[0].x, y: pts[0].y } : null, segments, closing };
+  }
+
   function layoutPiece(project, piece) {
     const settings = pieceSettings(project);
     const resolved = LT.resolve.resolvePiece(piece);
     const empty = { start: null, segments: [], closing: { mode: 'none', fillet: 0, corner: true } };
-    const outline = layoutContour(resolved.outline || empty, settings, { isOutline: true, origin: piece.outline.origin || null });
+    const outline = layoutContour(resolved.outline || empty, settings, { isOutline: true, origins: LT.model.originsOf(piece.outline) });
     const cutouts = resolved.cutouts.map((c) => ({
-      ...layoutContour(c.contour, settings, { isOutline: false, origin: c.origin }),
+      ...layoutContour(c.contour, settings, { isOutline: false, origins: c.origins || [] }),
       src: c.src,
     }));
-    return { settings, outline, cutouts, holeRadius: settings.holeDiameter / 2, resolved };
+    const paths = (piece.paths || [])
+      .filter((p) => (p.points || []).length > 1)
+      .map((p) => ({
+        ...layoutContour(pathContour(p), settings, { isOutline: true, path: true, origins: LT.model.originsOf(p) }),
+        src: p.id,
+        kind: 'path',
+        closed: !!p.closed,
+      }));
+    return { settings, outline, cutouts, paths, holeRadius: settings.holeDiameter / 2, resolved };
   }
+
+  // Everything laid out on a piece that can carry holes or stitching.
+  const allOf = (lay) => [lay.outline, ...lay.cutouts, ...(lay.paths || [])];
 
   // Bounding box of everything that gets drawn for a laid-out piece.
   function pieceBBox(lay) {
-    const all = [lay.outline, ...lay.cutouts];
+    const all = allOf(lay);
     const prims = [];
     all.forEach((c) => prims.push(...c.prims));
     const b = G.bbox(prims);
@@ -328,5 +397,5 @@
     return { type: 'line', a: G.add(origin.pt, G.mul(n, -half)), b: G.add(origin.pt, G.mul(n, half)) };
   }
 
-  LT.layout = { originTick, findRuns, distribute, layoutContour, layoutPiece, pieceSettings, pieceBBox };
+  LT.layout = { originTick, findRuns, layoutContour, layoutPiece, pathContour, allOf, pieceSettings, pieceBBox };
 })(typeof window !== 'undefined' ? window : globalThis);
