@@ -3,7 +3,7 @@
   'use strict';
   const LT = (root.LT = root.LT || {});
 
-  const VERSION = 1;
+  const VERSION = 2;
 
   const UNITS = {
     mm: { label: 'mm', factor: 1, decimals: 2 },
@@ -44,16 +44,27 @@
     return c;
   }
 
+  // A piece: its base outline, notches cut into outline edges, and shapes
+  // (`cutouts`). A shape's `op` says how it is used: 'hole' (a cutout inside
+  // the piece) or 'cut' / 'merge' / 'overlap' with the outline. Notches and
+  // combined shapes stay editable; js/resolve.js builds the final result.
+  // The outline and each shape may carry an `origin` {x, y}.
   function newPiece(name, outline) {
     return {
       id: uid(),
       name,
       outline: outline || rectangle(100, 60, 0, 0, 0, 'holes'),
+      notches: [],
       cutouts: [],
-      zero: { enabled: false, edge: 0, offset: 0 },
-      customSettings: false,
-      settings: {},
     };
+  }
+
+  function newShape(contour, op = 'hole') {
+    return { ...contour, id: uid(), op, joins: {} };
+  }
+
+  function newNotch(edge, width, depth) {
+    return { id: uid(), edge, at: null, width, depth, corners: { L: { fillet: 0, corner: true }, R: { fillet: 0, corner: true } } };
   }
 
   function newProject(name = 'Untitled project') {
@@ -79,15 +90,25 @@
         segments: (c && c.segments) || [],
         closing: { mode: 'none', fillet: 0, corner: true, ...((c && c.closing) || {}) },
       });
-      return {
+      const outline = fixContour(pc.outline);
+      // Version 1 kept a "zero point" as an edge and offset.
+      if (pc.zero && pc.zero.enabled && !outline.origin && LT.geom) {
+        const pt = LT.geom.pointOnEdge(outline, pc.zero.edge, pc.zero.offset);
+        if (pt) outline.origin = { x: pt.x, y: pt.y };
+      }
+      const out = {
         ...newPiece(pc.name || `Piece ${i + 1}`),
         ...pc,
         id: pc.id || uid(),
-        outline: fixContour(pc.outline),
-        cutouts: (pc.cutouts || []).map(fixContour),
-        zero: { enabled: false, edge: 0, offset: 0, ...(pc.zero || {}) },
-        settings: pc.settings || {},
+        outline,
+        notches: (pc.notches || []).map((n) => ({ ...newNotch(0, 20, 10), ...n, corners: { L: { fillet: 0, corner: true }, R: { fillet: 0, corner: true }, ...(n.corners || {}) } })),
+        cutouts: (pc.cutouts || []).map((c) => ({ id: uid(), op: 'hole', joins: {}, ...fixContour(c) })),
       };
+      // Stitching sizes are set once per project now.
+      delete out.zero;
+      delete out.customSettings;
+      delete out.settings;
+      return out;
     });
     if (!out.pieces.length) out.pieces = [newPiece('Piece 1')];
     out.version = VERSION;
@@ -149,6 +170,8 @@
     rectangle,
     circle,
     newPiece,
+    newShape,
+    newNotch,
     newProject,
     normalizeProject,
     toUnits,

@@ -166,6 +166,15 @@
             cv.dash(1.5, 1);
             ct.stitch.forEach((s) => cv.prims(s.prims, map, s.closed));
             cv.dash(0);
+            if (ct.origin) {
+              // Origin: a tick across the stitch line, or a ring round the hole.
+              cv.lineWidth(0.3);
+              if (ct.origin.kind === 'stitch') cv.prims([LT.layout.originTick(ct.origin)], map, false);
+              else {
+                const t = map(ct.origin.pt);
+                cv.circle(t.x, t.y, lay.holeRadius + 1);
+              }
+            }
             ct.holes.forEach((h) => {
               const t = map(h);
               cv.lineWidth(0.15);
