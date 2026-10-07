@@ -37,8 +37,15 @@
   // Notch outline relative to the edge: { segs: [{type,...}] } as turtle
   // segments starting at the notch's first mouth corner, heading h (deg),
   // with `s` = +1 when the material is to the left of the edge.
-  function notchSegments(h, width, depth, s) {
+  function notchSegments(h, width, depth, s, shape) {
     const w2 = width / 2;
+    if (shape === 'square') {
+      return [
+        { type: 'line', length: depth, angle: h + s * 90 },
+        { type: 'line', length: width, angle: h },
+        { type: 'line', length: depth, angle: h - s * 90 },
+      ];
+    }
     if (Math.abs(depth - w2) < 1e-6) {
       return [{ type: 'arc', radius: w2, sweep: -s * 180, angle: h + s * 90 }];
     }
@@ -120,9 +127,12 @@
         } else {
           startV = vL;
         }
-        const prims = segsToPrims(P0, notchSegments(h, Number(n.width), Number(n.depth), s));
+        const square = n.shape === 'square';
+        const prims = segsToPrims(P0, notchSegments(h, Number(n.width), Number(n.depth), s, n.shape));
         prims.forEach((p, k) => {
-          const v = k === 0 ? startV : { vref: `n:${n.id}:x`, fillet: 0, corner: true };
+          // A square notch has two real corners at the bottom; a round
+          // notch's inner joins are smooth.
+          const v = k === 0 ? startV : square ? notchVertex(n, k === 1 ? 'BL' : 'BR') : { vref: `n:${n.id}:x`, fillet: 0, corner: true };
           out.push({ ...p, ref: `n:${n.id}`, mode: e.mode, ...v });
         });
         const last = out[out.length - 1];
@@ -196,6 +206,151 @@
   };
 
   // ---------------------------------------------------------------------
+  // Cut lines. A line is two points; it is stretched both ways to the
+  // edges it crosses, which splits the shape into a part on its left and a
+  // part on its right (looking from a to b). `remove` says which part goes.
+  // The new edge is `l:<id>`; its corners are `l:<id>:a` (where it meets
+  // the edge near a) and `l:<id>:b`.
+
+  function ccwTagged(loop) {
+    return G.signedArea(loop) > 0 ? loop : reverseTagged(loop);
+  }
+
+  // Where the line through a and b crosses the loop: sorted distances from
+  // a (in units of |ab|) with the crossing points.
+  function lineCrossings(loop, a, b) {
+    const B2 = LT.boolean;
+    const ab = G.sub(b, a);
+    const L = G.len(ab);
+    const u = G.mul(ab, 1 / L);
+    const big = { type: 'line', a: G.sub(a, G.mul(u, 1e6)), b: G.add(a, G.mul(u, 1e6)) };
+    const out = [];
+    loop.forEach((p) => {
+      G.intersections(p, big).forEach((pt) => {
+        if (B2.paramOn(p, pt) === null) return;
+        const t = G.dot(G.sub(pt, a), u) / L;
+        if (!out.some((o) => Math.abs(o.t - t) * L < 1e-5)) out.push({ t, pt });
+      });
+    });
+    return out.sort((x, y) => x.t - y.t);
+  }
+
+  // The stretch of the line that lies inside the loop, nearest the drawn
+  // part: { P, Q } or null.
+  function lineChord(loop, a, b) {
+    if (G.dist(a, b) < 1e-6) return null;
+    const xs = lineCrossings(loop, a, b);
+    const poly = G.samplePoints(loop, 64);
+    let best = null;
+    for (let i = 0; i + 1 < xs.length; i++) {
+      const t0 = xs[i].t;
+      const t1 = xs[i + 1].t;
+      const mid = G.add(a, G.mul(G.sub(b, a), (t0 + t1) / 2));
+      if (!inside(poly, mid)) continue;
+      // Prefer the stretch holding the middle of what was drawn, then the
+      // one overlapping it most.
+      const holds = t0 <= 0.5 && t1 >= 0.5 ? 1 : 0;
+      const overlap = Math.min(t1, 1) - Math.max(t0, 0);
+      const score = holds * 1e6 + overlap;
+      if (!best || score > best.score) best = { score, P: xs[i].pt, Q: xs[i + 1].pt };
+    }
+    return best && { P: best.P, Q: best.Q };
+  }
+
+  function lineCorner(line, end) {
+    const cc = (line.corners && line.corners[end]) || {};
+    return { vref: `l:${line.id}:${end}`, fillet: Number(cc.fillet) || 0, corner: cc.corner !== false };
+  }
+
+  // Split a CCW loop at P and Q into the boundary from P to Q and from Q
+  // to P.
+  function splitAt(loop, P, Q) {
+    const B2 = LT.boolean;
+    const chord = { type: 'line', a: P, b: Q };
+    const parts = B2.splitLoop(loop, [chord]);
+    const iP = parts.findIndex((p) => G.dist(G.primStart(p), P) < 1e-4);
+    const iQ = parts.findIndex((p) => G.dist(G.primStart(p), Q) < 1e-4);
+    if (iP < 0 || iQ < 0) return null;
+    const walk = (from, to) => {
+      const out = [];
+      for (let k = from; out.length < parts.length; k = (k + 1) % parts.length) {
+        if (k === to && out.length) break;
+        out.push(parts[k]);
+      }
+      return out;
+    };
+    return { PQ: walk(iP, iQ), QP: walk(iQ, iP) };
+  }
+
+  // How much of the edge each end of the line lands on is kept:
+  // { prim (the whole edge), s (where the line meets it), fromStart }.
+  function lineEnd(loop, pt, fromStart) {
+    let best = null;
+    loop.forEach((p) => {
+      const s = LT.boolean.paramOn(p, pt);
+      if (s === null) return;
+      const L = G.primLength(p);
+      // At a corner, use the edge on the kept side.
+      const room = fromStart ? s : L - s;
+      if (!best || room > best.room) best = { prim: p, s, L, room };
+    });
+    if (!best) return null;
+    const { prim, s, L } = best;
+    return { prim: { ...prim }, ref: prim.ref, s, length: L, fromStart, kept: fromStart ? s : L - s };
+  }
+
+  function applyLine(edges, line, rep) {
+    const a = line.a;
+    const b = line.b;
+    if (!a || !b) {
+      rep.ok = false;
+      rep.reason = 'none';
+      return edges;
+    }
+    const loop = ccwTagged(edges);
+    const ch = lineChord(loop, a, b);
+    if (!ch) {
+      rep.ok = false;
+      rep.reason = 'miss';
+      return edges;
+    }
+    const sp = splitAt(loop, ch.P, ch.Q);
+    if (!sp) {
+      rep.ok = false;
+      rep.reason = 'miss';
+      return edges;
+    }
+    const mode = line.mode || 'none';
+    const cA = lineCorner(line, 'a');
+    const cB = lineCorner(line, 'b');
+    const edge = (p0, p1, v) => ({ type: 'line', a: p0, b: p1, ref: `l:${line.id}`, mode, ...v });
+    const withStart = (list, v) => list.map((p, k) => (k === 0 ? { ...p, ...v } : p));
+    // Left of a→b: the chord P→Q, then the boundary back from Q to P.
+    const left = [edge(ch.P, ch.Q, cA), ...withStart(sp.QP, cB)];
+    const right = [...withStart(sp.PQ, cA), edge(ch.Q, ch.P, cB)];
+    rep.ok = true;
+    rep.P = ch.P;
+    rep.Q = ch.Q;
+    rep.left = left;
+    rep.right = right;
+    if (line.remove !== 'left' && line.remove !== 'right') return edges;
+    const keepLeft = line.remove === 'right';
+    // Keeping the left part, the edge at P is kept up to P and the edge at
+    // Q from Q on; the other way round when keeping the right part.
+    rep.ends = { a: lineEnd(loop, ch.P, keepLeft), b: lineEnd(loop, ch.Q, !keepLeft) };
+    return keepLeft ? left : right;
+  }
+
+  function applyLines(edges, lines, report) {
+    let out = edges;
+    lines.forEach((ln) => {
+      report[ln.id] = {};
+      out = applyLine(out, ln, report[ln.id]);
+    });
+    return out;
+  }
+
+  // ---------------------------------------------------------------------
   // Back to an editable-looking contour (turtle segments) that keeps the
   // refs, so layout and fillets work unchanged.
 
@@ -216,14 +371,18 @@
   // ---------------------------------------------------------------------
 
   function resolvePiece(piece) {
-    const report = { notches: {}, shapes: {} };
+    const report = { notches: {}, shapes: {}, lines: {} };
     const base = piece.outline;
     const out = { outline: null, cutouts: [], report };
+    const lines = piece.lines || [];
+    const linesOn = (target) => lines.filter((l) => (l.target || 'outline') === target);
+    // A shape's own edges, after any lines drawn across it.
+    const shapeEdges = (c) => applyLines(taggedEdges(c, `c:${c.id}:`), linesOn(c.id), report.lines);
     let edges = taggedEdges(base, 'o:');
     if (!edges.length) {
       (piece.cutouts || []).forEach((c) => {
         if (!OPS.includes(c.op)) {
-          const e = taggedEdges(c, `c:${c.id}:`);
+          const e = shapeEdges(c);
           if (e.length) out.cutouts.push({ contour: primsToContour(e), src: c.id, origin: c.origin || null });
         }
       });
@@ -236,7 +395,7 @@
     const derived = [];
     (piece.cutouts || []).forEach((shape) => {
       if (!OPS.includes(shape.op)) return;
-      const B = taggedEdges(shape, `c:${shape.id}:`);
+      const B = shapeEdges(shape);
       if (!B.length) return;
       const loops = combineTagged(outer, B, shape.op, shape);
       if (!loops) {
@@ -261,10 +420,11 @@
       report.shapes[shape.id] = { ok: true, extra };
     });
 
+    outer = applyLines(outer, linesOn('outline'), report.lines);
     out.outline = primsToContour(outer);
     (piece.cutouts || []).forEach((c) => {
       if (OPS.includes(c.op)) return;
-      const e = taggedEdges(c, `c:${c.id}:`);
+      const e = shapeEdges(c);
       if (e.length) out.cutouts.push({ contour: primsToContour(e), src: c.id, origin: c.origin || null });
     });
     derived.forEach((l) => out.cutouts.push({ contour: primsToContour(l), src: null, origin: null }));
@@ -360,6 +520,12 @@
     const H = b.maxY - b.minY;
     const fn = resizeContour(piece.outline, w, h, 'topleft');
     if (piece.outline.origin) piece.outline.origin = fn(piece.outline.origin);
+    const lines = piece.lines || [];
+    lines.forEach((l) => {
+      if ((l.target || 'outline') !== 'outline') return;
+      l.a = fn(l.a);
+      l.b = fn(l.b);
+    });
     const nb = rawBox(piece.outline);
     const nmx = (nb.minX + nb.maxX) / 2;
     const nmy = (nb.minY + nb.maxY) / 2;
@@ -374,13 +540,24 @@
       const ty = Math.abs(cy - my) < tolY ? nmy - my : cy > my ? nb.maxY - b.maxY : nb.minY - b.minY;
       sh.start = { x: r4(sh.start.x + tx), y: r4(sh.start.y + ty) };
       if (sh.origin) sh.origin = { x: sh.origin.x + tx, y: sh.origin.y + ty };
+      lines.forEach((l) => {
+        if (l.target !== sh.id) return;
+        l.a = { x: l.a.x + tx, y: l.a.y + ty };
+        l.b = { x: l.b.x + tx, y: l.b.y + ty };
+      });
     });
   }
 
-  function resizeShape(shape, w, h) {
+  // lines: the piece's cut lines; the ones drawn across this shape follow it.
+  function resizeShape(shape, w, h, lines) {
     const fn = resizeContour(shape, w, h, 'centre');
     if (shape.origin) shape.origin = fn(shape.origin);
+    (lines || []).forEach((l) => {
+      if (l.target !== shape.id) return;
+      l.a = fn(l.a);
+      l.b = fn(l.b);
+    });
   }
 
-  LT.resolve = { resolvePiece, primsToContour, notchSegments, notchPlace, OPS, isCircle, rawBox, resizeContour, resizePiece, resizeShape };
+  LT.resolve = { resolvePiece, lineChord, ccwTagged, primsToContour, notchSegments, notchPlace, OPS, isCircle, rawBox, resizeContour, resizePiece, resizeShape };
 })(typeof window !== 'undefined' ? window : globalThis);

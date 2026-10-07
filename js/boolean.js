@@ -247,5 +247,5 @@
     return { outline: loopToContour(outer), holes, extra, open };
   }
 
-  LT.boolean = { splitShapes, preset, trace, combine, loopToContour, reversePrim, RULES };
+  LT.boolean = { splitShapes, splitLoop, subPrim, paramOn, preset, trace, simplify, combine, loopToContour, reversePrim, RULES };
 })(typeof window !== 'undefined' ? window : globalThis);

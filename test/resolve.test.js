@@ -152,3 +152,121 @@ test('resizing a shape about its centre, and a circle by diameter', () => {
   const cb = resolve.rawBox(c);
   assert.ok(near(cb.maxX - cb.minX, 30, 1e-3) && near((cb.minX + cb.maxX) / 2, 50, 1e-3));
 });
+
+// ---------------------------------------------------------------------
+// Cut lines, square notches and slots
+
+function lineCut(a, b, remove, target) {
+  const pc = card();
+  const ln = model.newLine(a, b, target);
+  ln.remove = remove;
+  pc.lines.push(ln);
+  return { pc, ln };
+}
+
+test('a line from an edge to a corner cuts the corner off', () => {
+  const pc = model.newPiece('Sq', model.rectangle(100, 100, 0, 0, 0, 'holes'));
+  const ln = model.newLine({ x: 0, y: 60 }, { x: 100, y: 100 });
+  ln.remove = 'left';
+  pc.lines.push(ln);
+  const r = resolve.resolvePiece(pc);
+  assert.ok(near(area(r.outline), 10000 - 2000, 1e-6));
+  // The new edge has no holes; the old edges keep theirs.
+  const cut = r.outline.segments.filter((s) => s.ref === `l:${ln.id}`);
+  assert.equal(cut.length, 1);
+  assert.equal(cut[0].mode, 'none');
+  assert.ok(r.outline.segments.filter((s) => s.ref.startsWith('o:')).every((s) => s.mode === 'holes'));
+  // How much of each edge is kept.
+  const ends = r.report.lines[ln.id].ends;
+  assert.ok(near(ends.a.kept, 60, 1e-6) && near(ends.a.length, 100, 1e-6));
+  assert.ok(near(ends.b.kept, 100, 1e-6));
+});
+
+test('a short line stretches to the edges and either side can go', () => {
+  // y = x - 20 across a 100 x 60 card: crosses (20, 0) and (80, 60).
+  const L = lineCut({ x: 40, y: 20 }, { x: 60, y: 40 }, 'left');
+  const R = lineCut({ x: 40, y: 20 }, { x: 60, y: 40 }, 'right');
+  const aL = area(resolve.resolvePiece(L.pc).outline);
+  const aR = area(resolve.resolvePiece(R.pc).outline);
+  assert.ok(near(aL, 3000, 1e-6) && near(aR, 3000, 1e-6));
+  const rep = resolve.resolvePiece(L.pc).report.lines[L.ln.id];
+  assert.ok(near(rep.P.x, 20, 1e-6) && near(rep.P.y, 0, 1e-6));
+  assert.ok(near(rep.Q.x, 80, 1e-6) && near(rep.Q.y, 60, 1e-6));
+});
+
+test('a line that misses does nothing, and an unpicked line cuts nothing', () => {
+  const miss = lineCut({ x: 200, y: 0 }, { x: 200, y: 10 }, 'left');
+  const r = resolve.resolvePiece(miss.pc);
+  assert.equal(r.report.lines[miss.ln.id].ok, false);
+  assert.ok(near(area(r.outline), 6000, 1e-6));
+  const open = lineCut({ x: 0, y: 30 }, { x: 100, y: 30 }, null);
+  const r2 = resolve.resolvePiece(open.pc);
+  assert.ok(r2.report.lines[open.ln.id].ok);
+  assert.ok(near(area(r2.outline), 6000, 1e-6));
+});
+
+test('line corners can be rounded and lines also cut shapes', () => {
+  const { pc, ln } = lineCut({ x: 0, y: 40 }, { x: 40, y: 60 }, 'left');
+  ln.corners.a.fillet = 3;
+  const r = resolve.resolvePiece(pc);
+  const seg = r.outline.segments.find((s) => s.vref === `l:${ln.id}:a`);
+  assert.ok(seg && seg.fillet === 3);
+  // A line across a hole shape trims the hole, not the outline.
+  const pc2 = card();
+  const sh = model.newShape(model.rectangle(20, 20, 0, 40, 20));
+  pc2.cutouts.push(sh);
+  const l2 = model.newLine({ x: 40, y: 30 }, { x: 60, y: 30 }, sh.id);
+  l2.remove = 'left'; // the top half of the hole
+  pc2.lines.push(l2);
+  const r2 = resolve.resolvePiece(pc2);
+  assert.ok(near(area(r2.outline), 6000, 1e-6));
+  assert.ok(near(area(r2.cutouts[0].contour), 200, 1e-6));
+});
+
+test('square notch has real corners that can be rounded', () => {
+  const pc = card();
+  const n = model.newNotch(2, 20, 15);
+  n.shape = 'square';
+  pc.notches.push(n);
+  let r = resolve.resolvePiece(pc);
+  assert.ok(near(area(r.outline), 6000 - 300, 1e-6));
+  n.corners.BL = { fillet: 2, corner: true };
+  n.corners.BR = { fillet: 2, corner: true };
+  r = resolve.resolvePiece(pc);
+  const lost = 2 * (4 - Math.PI); // two 2 mm fillets on the inside corners add material back
+  assert.ok(near(area(r.outline), 6000 - 300 + lost, 1e-6));
+});
+
+test('slot shape has the right size and area', () => {
+  const tall = model.slot(20, 50, 10, 10);
+  const b = G.bbox(G.buildPrimitives(tall));
+  assert.ok(near(b.maxX - b.minX, 20) && near(b.maxY - b.minY, 50));
+  assert.ok(near(area(tall), 30 * 20 + Math.PI * 100, 1e-6));
+  const wide = model.slot(50, 20);
+  const bw = G.bbox(G.buildPrimitives(wide));
+  assert.ok(near(bw.maxX - bw.minX, 50) && near(bw.maxY - bw.minY, 20));
+});
+
+test('lines move with the piece and shapes they cut', () => {
+  const { pc, ln } = lineCut({ x: 0, y: 40 }, { x: 40, y: 60 }, 'left');
+  resolve.resizePiece(pc, 150, 80);
+  // The piece grows down and to the right; the line's ends stay on the
+  // left and top edges.
+  assert.ok(near(ln.a.x, 0) && near(ln.b.y, 60));
+  const before = resolve.resolvePiece(pc);
+  assert.ok(before.report.lines[ln.id].ok);
+  const sh = model.newShape(model.rectangle(20, 20, 0, 40, 20));
+  const l2 = model.newLine({ x: 40, y: 30 }, { x: 60, y: 30 }, sh.id);
+  resolve.resizeShape(sh, 40, 20, [l2]);
+  assert.ok(near(l2.a.x, 30) && near(l2.b.x, 70));
+});
+
+test('projects keep their lines when loaded', () => {
+  const p = model.newProject();
+  p.pieces[0].lines.push(model.newLine({ x: 0, y: 1 }, { x: 2, y: 3 }));
+  const q = model.normalizeProject(JSON.parse(JSON.stringify(p)));
+  assert.equal(q.pieces[0].lines.length, 1);
+  assert.ok(q.pieces[0].lines[0].corners.a);
+  const old = model.normalizeProject({ pieces: [{ outline: model.rectangle(10, 10) }] });
+  assert.deepEqual(old.pieces[0].lines, []);
+});
