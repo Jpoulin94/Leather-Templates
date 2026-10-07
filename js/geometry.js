@@ -180,6 +180,71 @@
     return primEnd(edges[edges.length - 1]);
   }
 
+  // Offset one primitive sideways (positive = left of travel), as an
+  // infinite line or full circle. Null when an arc would vanish.
+  function offsetOne(p, dLeft) {
+    if (p.type === 'line') {
+      const n = mul(perpLeft(norm(sub(p.b, p.a))), dLeft);
+      return { type: 'line', a: add(p.a, n), b: add(p.b, n) };
+    }
+    const r = p.r - Math.sign(p.sweep) * dLeft;
+    return r > 1e-9 ? { type: 'arc', c: p.c, r, a0: p.a0, sweep: p.sweep } : null;
+  }
+
+  // Closest point to `pt` on the infinite line or full circle of p.
+  function footOn(p, pt) {
+    if (p.type === 'line') {
+      const d = norm(sub(p.b, p.a));
+      return add(p.a, mul(d, dot(sub(pt, p.a), d)));
+    }
+    const v = sub(pt, p.c);
+    if (len(v) < 1e-12) return null;
+    return add(p.c, mul(norm(v), p.r));
+  }
+
+  // Distance along p of pt when pt lies on p, else -1.
+  function paramIfOn(p, pt) {
+    const s = projectOnPrim(p, pt);
+    return dist(primPointAt(p, s), pt) < 1e-6 ? s : -1;
+  }
+
+  // Round the corner where `prev` ends and `cur` starts, for any mix of
+  // lines and arcs. The fillet may use at most half of each neighbour;
+  // a radius that doesn't fit is reduced until it does.
+  function filletAny(prev, cur, r) {
+    const t1 = primEndTangent(prev);
+    const t2 = primStartTangent(cur);
+    const cr = cross(t1, t2);
+    if (Math.abs(cr) < 1e-9) return null;
+    const side = cr > 0 ? 1 : -1;
+    const P = primEnd(prev);
+    const L1 = primLength(prev);
+    const L2 = primLength(cur);
+    for (let k = 0, rr = r; k < 40; k++, rr *= 0.85) {
+      const op = offsetOne(prev, side * rr);
+      const oc = offsetOne(cur, side * rr);
+      if (!op || !oc) continue;
+      const cands = intersections(op, oc);
+      if (!cands.length) continue;
+      let C = cands[0];
+      cands.forEach((c) => {
+        if (dist(c, P) < dist(C, P)) C = c;
+      });
+      const T1 = footOn(prev, C);
+      const T2 = footOn(cur, C);
+      if (!T1 || !T2) continue;
+      const s1 = paramIfOn(prev, T1);
+      const s2 = paramIfOn(cur, T2);
+      if (s1 < L1 / 2 - 1e-9 || s2 < 0 || s2 > L2 / 2 + 1e-9) continue;
+      const a0 = Math.atan2(T1.y - C.y, T1.x - C.x);
+      const a1 = Math.atan2(T2.y - C.y, T2.x - C.x);
+      const d = ((((a1 - a0) * side) % TAU) + TAU) % TAU;
+      if (d < 1e-9 || d > Math.PI + 1e-6) continue;
+      return { T1, T2, arc: { type: 'arc', c: C, r: rr, a0, sweep: side * d } };
+    }
+    return null;
+  }
+
   // Edges with fillets applied: returns primitives tagged with
   //   edge   (source edge index) or fillet (vertex index),
   //   vStart / vEnd (vertex index at each end),
@@ -195,7 +260,15 @@
       const prev = edges[prevIdx];
       const cur = edges[i];
       let r = vertexProps(contour, cur.edge).fillet;
-      if (!(r > 0) || prev.type !== 'line' || cur.type !== 'line') continue;
+      if (!(r > 0)) continue;
+      if (prev.type !== 'line' || cur.type !== 'line') {
+        const f = filletAny(prev, cur, r);
+        if (!f) continue;
+        fillets[i] = { ...f.arc, fillet: cur.edge };
+        setPrimEnd(out[prevIdx], f.T1);
+        setPrimStart(out[i], f.T2);
+        continue;
+      }
       const u1 = norm(sub(prev.b, prev.a));
       const u2 = norm(sub(cur.b, cur.a));
       const cr = cross(u1, u2);
@@ -392,6 +465,20 @@
     return primPointAt(e, s);
   }
 
+  // Nearest point on a chain of primitives: { s (distance along), pt, d }.
+  function nearestOnPath(prims, pt) {
+    let best = null;
+    let acc = 0;
+    prims.forEach((p) => {
+      const s = projectOnPrim(p, pt);
+      const q = primPointAt(p, s);
+      const d = dist(q, pt);
+      if (!best || d < best.d) best = { s: acc + s, pt: q, d };
+      acc += primLength(p);
+    });
+    return best;
+  }
+
   LT.geom = {
     TAU,
     rad,
@@ -426,5 +513,9 @@
     pathLength,
     pathPointAt,
     pointOnEdge,
+    setPrimStart,
+    setPrimEnd,
+    footOn,
+    nearestOnPath,
   };
 })(typeof window !== 'undefined' ? window : globalThis);

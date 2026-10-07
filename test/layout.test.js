@@ -102,13 +102,23 @@ test('cutout holes go outside the cutout', () => {
   assert.ok(hasPoint(r.holes, 64, 34));
 });
 
-test('zero point adds an anchor so mating pieces line up', () => {
+test('origin point adds an anchor so mating pieces line up', () => {
   const c = model.rectangle(100, 50, 0, 0, 0, 'none');
   c.segments[0].mode = 'holes';
   c.segments[0].corner = false;
   c.segments[1].corner = false;
-  const r = layout.layoutContour(c, settings, { isOutline: true, zero: { edge: 0, offset: 30 } });
+  // Clicked near the hole line: snaps onto it.
+  const r = layout.layoutContour(c, settings, { isOutline: true, origin: { x: 30, y: 5 } });
   assert.ok(hasPoint(r.holes, 30, 4));
+  assert.equal(r.origin.kind, 'hole');
+});
+
+test('origin on a stitch line is marked with a tick position', () => {
+  const c = model.rectangle(100, 50, 0, 0, 0, 'stitch');
+  const r = layout.layoutContour(c, settings, { isOutline: true, origin: { x: 40, y: 3 } });
+  assert.equal(r.origin.kind, 'stitch');
+  assert.ok(near(r.origin.pt.x, 40) && near(r.origin.pt.y, 4));
+  assert.ok(near(Math.abs(r.origin.tangent.x), 1, 1e-6));
 });
 
 test('stitch line is offset from the edge', () => {

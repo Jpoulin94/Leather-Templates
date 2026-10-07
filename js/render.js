@@ -66,6 +66,7 @@
           cut.push(`<circle cx="${n(t.x)}" cy="${n(t.y)}" r="${n(lay.holeRadius)}"/>`);
         });
         c.stitch.forEach((s) => score.push(`<path d="${pathData(s.prims, tx, s.closed)}"/>`));
+        if (c.origin && c.origin.kind === 'stitch') score.push(`<path d="${pathData([LT.layout.originTick(c.origin)], tx, false)}"/>`);
       });
       const id = `piece${i + 1}-${String(piece.name).replace(/[^A-Za-z0-9_-]+/g, '-')}`;
       parts.push(

@@ -5,7 +5,7 @@
 // outline, outward for a cutout. Holes are placed on runs of consecutive
 // edges set to 'holes'. Within a run, "anchors" always get a hole:
 //   - sharp corners whose corner hole is switched on,
-//   - the piece's zero point, when it falls on the run,
+//   - the origin point, when it sits on the run,
 //   - run ends, when the corner hole at that end is switched on.
 // Between anchors the spacing is stretched or shrunk slightly so the holes
 // divide the distance evenly. An end without an anchor is inset by half a
@@ -64,7 +64,7 @@
     return { pos, actual, length };
   }
 
-  function layoutRun(run, contour, spacing, zeroPt) {
+  function layoutRun(run, contour, spacing, originS) {
     const prims = run.prims;
     const cum = [0];
     prims.forEach((p) => cum.push(cum[cum.length - 1] + G.primLength(p)));
@@ -78,16 +78,7 @@
     if (run.closed && isSharp(prims[prims.length - 1], prims[0]) && corner(prims[0].vStart)) {
       anchors.push(0);
     }
-    if (zeroPt) {
-      let best = null;
-      prims.forEach((p, j) => {
-        if (p.edge !== zeroPt.edge || p.fillet !== undefined) return;
-        const s = G.projectOnPrim(p, zeroPt.pt);
-        const d = G.dist(G.primPointAt(p, s), zeroPt.pt);
-        if (!best || d < best.d) best = { d, s: cum[j] + s };
-      });
-      if (best) anchors.push(best.s);
-    }
+    if (originS !== null && originS !== undefined) anchors.push(originS);
     anchors.sort((a, b) => a - b);
     const uniq = anchors.filter((a, i) => i === 0 || a - anchors[i - 1] > 1e-6);
 
@@ -98,7 +89,7 @@
       uniq.forEach((a, i) => {
         const b = i + 1 < uniq.length ? uniq[i + 1] : uniq[0] + L;
         const r = distribute(a, b, true, true, spacing);
-        sections.push(r);
+        sections.push({ ...r, from: a, to: b, path: prims, closed: true });
         positions = positions.concat(r.pos.slice(0, -1)); // end = next anchor
       });
       positions = positions.map((s) => ((s % L) + L) % L);
@@ -108,7 +99,7 @@
       const flags = [corner(prims[0].vStart), ...inner.map(() => true), corner(prims[prims.length - 1].vEnd)];
       for (let i = 0; i + 1 < bps.length; i++) {
         const r = distribute(bps[i], bps[i + 1], flags[i], flags[i + 1], spacing);
-        sections.push(r);
+        sections.push({ ...r, from: bps[i], to: bps[i + 1], path: prims, closed: false });
         positions = positions.concat(r.pos);
       }
     }
@@ -119,53 +110,67 @@
   }
 
   // settings: { holeDiameter, spacing, edgeDistance, stitchOffset }
-  // opts: { isOutline, zero: { edge, offset } | null }
+  // opts: { isOutline, origin: {x, y} | null }
+  // The origin snaps to the nearest hole run or stitch line of the contour.
+  // On a hole run a hole always lands on it; on a stitch line it is marked
+  // with a short tick across the line.
   function layoutContour(contour, settings, opts) {
     const prims = G.buildPrimitives(contour);
-    const res = { prims, holes: [], holePaths: [], stitch: [], sections: [] };
+    const res = { contour, prims, holes: [], holePaths: [], stitch: [], sections: [], origin: null };
     if (!prims.length) return res;
     const ccw = G.signedArea(prims) > 0;
     const side = opts.isOutline === ccw ? 1 : -1; // +1: material is on the left
 
+    let holeRuns = [];
     if (prims.some((p) => p.mode === 'holes') && settings.spacing > 0) {
       const d = settings.edgeDistance + settings.holeDiameter / 2;
-      const off = G.offsetPrims(prims, side * d);
-      let zeroPt = null;
-      if (opts.zero) {
-        const pt = G.pointOnEdge(contour, opts.zero.edge, opts.zero.offset);
-        if (pt) zeroPt = { edge: opts.zero.edge, pt };
-      }
-      findRuns(off, 'holes').forEach((run) => {
-        const r = layoutRun(run, contour, settings.spacing, zeroPt);
-        res.holes = res.holes.concat(r.points);
-        res.holePaths.push({ prims: r.path, closed: run.closed });
-        r.sections.forEach((s) => res.sections.push({ ...s, requested: settings.spacing }));
-      });
+      holeRuns = findRuns(G.offsetPrims(prims, side * d), 'holes');
     }
     if (prims.some((p) => p.mode === 'stitch')) {
-      const off = G.offsetPrims(prims, side * settings.stitchOffset);
-      res.stitch = findRuns(off, 'stitch');
+      res.stitch = findRuns(G.offsetPrims(prims, side * settings.stitchOffset), 'stitch');
+    }
+
+    let best = null;
+    if (opts.origin) {
+      const consider = (run, kind, i) => {
+        const n = G.nearestOnPath(run.prims, opts.origin);
+        if (n && (!best || n.d < best.d)) best = { ...n, kind, i };
+      };
+      holeRuns.forEach((r, i) => consider(r, 'hole', i));
+      res.stitch.forEach((r, i) => consider(r, 'stitch', i));
+    }
+
+    holeRuns.forEach((run, i) => {
+      const s = best && best.kind === 'hole' && best.i === i ? best.s : null;
+      const r = layoutRun(run, contour, settings.spacing, s);
+      res.holes = res.holes.concat(r.points);
+      res.holePaths.push({ prims: r.path, closed: run.closed });
+      r.sections.forEach((sec) => res.sections.push({ ...sec, requested: settings.spacing }));
+    });
+
+    if (best) {
+      const run = best.kind === 'hole' ? holeRuns[best.i] : res.stitch[best.i];
+      const ahead = G.pathPointAt(run.prims, Math.min(G.pathLength(run.prims), best.s + 0.01));
+      const behind = G.pathPointAt(run.prims, Math.max(0, best.s - 0.01));
+      res.origin = { kind: best.kind, pt: G.pathPointAt(run.prims, best.s), tangent: G.norm(G.sub(ahead, behind)) };
     }
     return res;
   }
 
-  function pieceSettings(project, piece) {
-    const s = { ...project.defaults };
-    if (piece.customSettings && piece.settings) {
-      Object.keys(s).forEach((k) => {
-        const v = Number(piece.settings[k]);
-        if (Number.isFinite(v) && v >= 0) s[k] = v;
-      });
-    }
-    return s;
+  function pieceSettings(project) {
+    return { ...project.defaults };
   }
 
   function layoutPiece(project, piece) {
-    const settings = pieceSettings(project, piece);
-    const zero = piece.zero && piece.zero.enabled ? piece.zero : null;
-    const outline = layoutContour(piece.outline, settings, { isOutline: true, zero });
-    const cutouts = (piece.cutouts || []).map((c) => layoutContour(c, settings, { isOutline: false, zero: null }));
-    return { settings, outline, cutouts, holeRadius: settings.holeDiameter / 2 };
+    const settings = pieceSettings(project);
+    const resolved = LT.resolve.resolvePiece(piece);
+    const empty = { start: null, segments: [], closing: { mode: 'none', fillet: 0, corner: true } };
+    const outline = layoutContour(resolved.outline || empty, settings, { isOutline: true, origin: piece.outline.origin || null });
+    const cutouts = resolved.cutouts.map((c) => ({
+      ...layoutContour(c.contour, settings, { isOutline: false, origin: c.origin }),
+      src: c.src,
+    }));
+    return { settings, outline, cutouts, holeRadius: settings.holeDiameter / 2, resolved };
   }
 
   // Bounding box of everything that gets drawn for a laid-out piece.
@@ -186,5 +191,11 @@
     return b;
   }
 
-  LT.layout = { findRuns, distribute, layoutContour, layoutPiece, pieceSettings, pieceBBox };
+  // A short line across the stitch line marking a stitch-line origin.
+  function originTick(origin, half = 3) {
+    const n = { x: -origin.tangent.y, y: origin.tangent.x };
+    return { type: 'line', a: G.add(origin.pt, G.mul(n, -half)), b: G.add(origin.pt, G.mul(n, half)) };
+  }
+
+  LT.layout = { originTick, findRuns, distribute, layoutContour, layoutPiece, pieceSettings, pieceBBox };
 })(typeof window !== 'undefined' ? window : globalThis);

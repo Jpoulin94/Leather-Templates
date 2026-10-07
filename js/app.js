@@ -1,14 +1,26 @@
 // User interface: canvas editor, selection, inspector, saving and export.
+//
+// The canvas shows each piece as resolved by js/resolve.js. Every edge and
+// corner on screen carries a reference back to where its settings live (the
+// base outline, a notch, a shape, or a corner made by combining shapes), so
+// clicking it edits the right thing and everything stays editable.
 (function () {
   'use strict';
-  const { model: M, geom: G, layout: Lay, render: R, pdf: P, storage: S } = window.LT;
+  const { model: M, geom: G, layout: Lay, render: R, pdf: P, storage: S, resolve: RS } = window.LT;
 
   const $ = (sel, el = document) => el.querySelector(sel);
   const $$ = (sel, el = document) => Array.from(el.querySelectorAll(sel));
   const esc = R.escapeXml;
-  const LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
-  const vName = (i) => (i < 26 ? LETTERS[i] : LETTERS[Math.floor(i / 26) - 1] + LETTERS[i % 26]);
   const MODE_LABEL = { holes: 'Holes', stitch: 'Stitch line', none: 'None' };
+  const OP_LABEL = { hole: 'Hole', cut: 'Cut away', merge: 'Merge', overlap: 'Overlap' };
+  const OP_SUB = {
+    hole: 'cut out inside the piece',
+    cut: 'cut away from the outline',
+    merge: 'merged into the outline',
+    overlap: 'only the overlap is kept',
+  };
+  // Corner colours by radius, so corners with the same rounding match.
+  const RADIUS_COLORS = ['#d9480f', '#2f9e44', '#1971c2', '#ae3ec9', '#e8590c', '#0c8599', '#c2255c', '#5c940d'];
 
   // Icons (24px grid, stroked)
   const ICON = {
@@ -29,19 +41,39 @@
     edge: '<path d="M4 18L20 6"/><circle cx="8" cy="15" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="16" cy="9" r="1.2"/>',
     piece: '<rect x="4" y="5" width="16" height="14" rx="3"/>',
     shape: '<rect x="3" y="7" width="12" height="10" rx="1.5"/><circle cx="15" cy="12" r="5"/>',
+    notch: '<path d="M3 7h6a3 3 0 006 0h6v11H3z"/>',
     info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8v.01"/>',
     pdf: '<path d="M6 3h9l4 4v14H6z"/><path d="M14 3v5h5M9 13h6M9 17h6"/>',
     laser: '<path d="M12 3v7M8 6l4 4 4-4"/><rect x="4" y="14" width="16" height="6" rx="1"/>',
     check: '<path d="M5 12l5 5 9-10"/>',
+    resize: '<path d="M4 9V4h5M20 15v5h-5M4 4l7 7M20 20l-7-7"/>',
+    x: '<path d="M6 6l12 12M18 6L6 18"/>',
   };
   const icon = (name, cls = 'i') => `<svg class="${cls}" viewBox="0 0 24 24" aria-hidden="true">${ICON[name]}</svg>`;
+
+  const pref = (k, d) => {
+    try {
+      const v = localStorage.getItem(`leather-templates.ui.${k}`);
+      return v === null ? d : JSON.parse(v);
+    } catch (e) {
+      return d;
+    }
+  };
+  const setPref = (k, v) => {
+    try {
+      localStorage.setItem(`leather-templates.ui.${k}`, JSON.stringify(v));
+    } catch (e) {
+      /* private mode */
+    }
+  };
 
   let project = S.loadCurrent() || M.newProject();
   const ui = {
     pieceIdx: 0,
-    contour: { kind: 'outline', idx: 0 }, // the shape the inspector and selection refer to
-    sel: { type: null, items: [] }, // type: 'edge' | 'corner' | 'shape' | null
-    tool: 'select', // 'select' | 'draw' | 'zero'
+    sel: { type: null, items: [] }, // type: 'edge' | 'corner' | 'shape' | 'notch' | null
+    tool: 'select', // 'select' | 'draw' | 'round' | 'origin'
+    drawTarget: 'outline', // 'outline' or a shape id while drawing
+    brush: null, // corner radius (mm) the round tool applies
     snap: true,
     view: null,
     mouse: null,
@@ -50,37 +82,157 @@
     dirty: false,
     savedName: null,
     paper: 'letter',
-    combine: null, // { idx, pieces } while choosing lines
+    combine: null, // { id, pieces } while choosing lines
     alignTarget: 'outline',
     advOpen: false,
+    stitchOpen: pref('stitchOpen', true),
+    checkOpen: false,
+    highlight: null, // adjusted spacing section to show on the drawing
+    adjusted: [],
   };
 
   // ---------------------------------------------------------------------
   // Accessors
 
   const piece = () => project.pieces[ui.pieceIdx];
-  function contour() {
-    const p = piece();
-    if (ui.contour.kind === 'cutout' && p.cutouts[ui.contour.idx]) return p.cutouts[ui.contour.idx];
-    ui.contour = { kind: 'outline', idx: 0 };
-    return p.outline;
-  }
+  const shapeById = (id, pc = piece()) => pc.cutouts.find((c) => c.id === id) || null;
+  const shapeNo = (id, pc = piece()) => pc.cutouts.findIndex((c) => c.id === id) + 1;
+  const notchById = (id, pc = piece()) => (pc.notches || []).find((n) => n.id === id) || null;
   const units = () => project.units;
+  const inch = () => units() === 'in';
   const fmt = (mm) => M.format(mm, units());
   const edgeProps = (c, src) => (src < c.segments.length ? c.segments[src] : c.closing);
-  const minorStep = () => (units() === 'in' ? 25.4 / 16 : 1);
-  const contourBox = (c) => G.bbox(G.buildPrimitives(c));
+  const minorStep = () => (inch() ? 25.4 / 16 : 1);
   const round = (v) => Math.round(v * 10000) / 10000;
   const flip = (p) => ({ x: p.x, y: -p.y });
   const num = (v) => Number(v.toFixed(4));
-  const isOutline = () => ui.contour.kind === 'outline';
+  const isLiveOp = (sh) => RS.OPS.includes(sh.op);
+
+  function drawContour() {
+    const pc = piece();
+    if (ui.drawTarget !== 'outline') {
+      const sh = shapeById(ui.drawTarget);
+      if (sh) return sh;
+      ui.drawTarget = 'outline';
+    }
+    return pc.outline;
+  }
 
   function moveContour(c, dx, dy) {
     if (c.start) c.start = { x: round(c.start.x + dx), y: round(c.start.y + dy) };
+    if (c.origin) c.origin = { x: c.origin.x + dx, y: c.origin.y + dy };
   }
 
   function numInput(attrs, mm) {
-    return `<span class="num" data-unit="${units()}"><input type="text" inputmode="decimal" ${attrs} value="${mm === '' ? '' : fmt(mm)}"></span>`;
+    return `<span class="num" data-unit="${units()}"><input type="text" inputmode="decimal" ${attrs} value="${mm === '' || mm === null ? '' : fmt(mm)}"></span>`;
+  }
+
+  // Layout of the current piece, cached until the project changes.
+  let layCache = { key: null, lay: null };
+  function curLay() {
+    const key = JSON.stringify([project.defaults, piece()]);
+    if (layCache.key !== key) layCache = { key, lay: Lay.layoutPiece(project, piece()) };
+    return layCache.lay;
+  }
+
+  // ---------------------------------------------------------------------
+  // References: where the settings of an edge or corner live.
+  //   o:<i>  c:<shape>:<i>  n:<notch>[:L|:R|:x]  j:<shape>:<key>
+
+  function parseRef(ref) {
+    const p = String(ref).split(':');
+    if (p[0] === 'o') return { kind: 'o', idx: Number(p[1]) };
+    if (p[0] === 'c') return { kind: 'c', id: p[1], idx: Number(p[2]) };
+    if (p[0] === 'n') return { kind: 'n', id: p[1], side: p[2] || null };
+    if (p[0] === 'j') return { kind: 'j', id: p[1], key: p.slice(2).join(':') };
+    return { kind: '?' };
+  }
+
+  // Object whose .mode controls an edge (null for notch edges, which follow
+  // the edge they are cut into).
+  function edgeTarget(ref) {
+    const r = parseRef(ref);
+    const pc = piece();
+    if (r.kind === 'o') return edgeProps(pc.outline, r.idx);
+    if (r.kind === 'c') {
+      const sh = shapeById(r.id);
+      return sh ? edgeProps(sh, r.idx) : null;
+    }
+    return null;
+  }
+
+  // Object holding a corner's { fillet, corner }.
+  function cornerTarget(vref) {
+    const r = parseRef(vref);
+    const pc = piece();
+    if (r.kind === 'o') return edgeProps(pc.outline, r.idx);
+    if (r.kind === 'c') {
+      const sh = shapeById(r.id);
+      return sh ? edgeProps(sh, r.idx) : null;
+    }
+    if (r.kind === 'n' && (r.side === 'L' || r.side === 'R')) {
+      const n = notchById(r.id);
+      if (!n) return null;
+      n.corners = n.corners || {};
+      n.corners[r.side] = n.corners[r.side] || { fillet: 0, corner: true };
+      return n.corners[r.side];
+    }
+    if (r.kind === 'j') {
+      const sh = shapeById(r.id);
+      if (!sh) return null;
+      sh.joins = sh.joins || {};
+      sh.joins[r.key] = sh.joins[r.key] || { fillet: 0, corner: true };
+      return sh.joins[r.key];
+    }
+    return null;
+  }
+
+  function refWhere(ref) {
+    const r = parseRef(ref);
+    if (r.kind === 'o') return 'the outline';
+    if (r.kind === 'n') return 'a notch';
+    if (r.kind === 'c' || r.kind === 'j') return `shape ${shapeNo(r.id)}`;
+    return '';
+  }
+
+  // Corners shown on the drawing: { pt, vref, fillet, corner } for each
+  // laid-out contour. Smooth joins (no turn) are not corners.
+  function cornersOf(lc) {
+    const c = lc.contour;
+    const edges = G.buildEdges(c);
+    const n = edges.length;
+    const out = [];
+    if (n < 2) return out;
+    edges.forEach((e, i) => {
+      const prev = edges[(i - 1 + n) % n];
+      const vp = G.vertexProps(c, e.edge);
+      const seg = edgeProps(c, e.edge);
+      const vref = seg && seg.vref;
+      if (!vref || /^n:[^:]+:x$/.test(vref)) return;
+      const t1 = G.primEndTangent(prev);
+      const t2 = G.primStartTangent(e);
+      const sharp = Math.acos(Math.max(-1, Math.min(1, G.dot(t1, t2)))) > G.rad(2);
+      if (!sharp && !(vp.fillet > 0)) return;
+      out.push({ pt: G.primStart(e), vref, fillet: vp.fillet, corner: vp.corner });
+    });
+    return out;
+  }
+
+  function allCorners(lay = curLay()) {
+    return [lay.outline, ...lay.cutouts].flatMap((lc) => cornersOf(lc));
+  }
+
+  // Distinct radii in use on this piece, for colours and the legend.
+  function radiiInUse(lay = curLay()) {
+    const list = [];
+    allCorners(lay).forEach((c) => {
+      if (c.fillet > 0 && !list.some((r) => Math.abs(r - c.fillet) < 1e-6)) list.push(c.fillet);
+    });
+    return list.sort((a, b) => a - b);
+  }
+  function radiusColor(r, list) {
+    const i = list.findIndex((x) => Math.abs(x - r) < 1e-6);
+    return i < 0 ? 'var(--accent)' : RADIUS_COLORS[i % RADIUS_COLORS.length];
   }
 
   // ---------------------------------------------------------------------
@@ -108,20 +260,29 @@
   }
 
   function validateSel() {
-    const c = contour();
-    if (ui.sel.type === 'edge' || ui.sel.type === 'corner') {
-      const ids = new Set(G.buildEdges(c).map((e) => e.edge));
-      ui.sel.items = ui.sel.items.filter((i) => ids.has(i));
-      if (!ui.sel.items.length) ui.sel = { type: null, items: [] };
+    const pc = piece();
+    const t = ui.sel.type;
+    if (t === 'shape') ui.sel.items = ui.sel.items.filter((id) => shapeById(id));
+    else if (t === 'notch') ui.sel.items = ui.sel.items.filter((id) => notchById(id));
+    else if (t === 'edge' || t === 'corner') {
+      const lay = curLay();
+      const live = new Set();
+      [lay.outline, ...lay.cutouts].forEach((lc) =>
+        lc.contour.segments.forEach((s) => {
+          if (t === 'edge' && s.ref) live.add(s.ref);
+          if (t === 'corner' && s.vref) live.add(s.vref);
+        })
+      );
+      ui.sel.items = ui.sel.items.filter((r) => live.has(r));
     }
-    if (ui.sel.type === 'shape' && isOutline()) ui.sel = { type: null, items: [] };
+    if (t && !ui.sel.items.length) ui.sel = { type: null, items: [] };
+    if (ui.combine && !shapeById(ui.combine.id, pc)) ui.combine = null;
   }
 
   function restore(snapshot) {
     project = JSON.parse(snapshot);
     history.last = snapshot;
     ui.pieceIdx = Math.min(ui.pieceIdx, project.pieces.length - 1);
-    contour();
     validateSel();
     if (ui.tool === 'draw') ui.tool = 'select';
     ui.combine = null;
@@ -222,10 +383,8 @@
   // ---------------------------------------------------------------------
   // Pieces and shapes
 
-  const inch = () => units() === 'in';
-
   function pieceCenter() {
-    const b = Lay.pieceBBox(Lay.layoutPiece(project, piece()));
+    const b = Lay.pieceBBox(curLay());
     return b ? { x: (b.minX + b.maxX) / 2, y: (b.minY + b.maxY) / 2 } : { x: 0, y: 0 };
   }
 
@@ -233,7 +392,7 @@
     if (kind === 'draw') {
       project.pieces.push(M.newPiece(`Piece ${project.pieces.length + 1}`, M.newContour()));
       selectPiece(project.pieces.length - 1, false);
-      startDraw();
+      startDraw('outline');
       return;
     }
     let outline;
@@ -245,10 +404,9 @@
       const v = await askLengths('New rectangle piece', [
         { key: 'w', label: 'Width', value: inch() ? 101.6 : 100, positive: true },
         { key: 'h', label: 'Height', value: inch() ? 63.5 : 60, positive: true },
-        { key: 'r', label: 'Corner radius', value: 0 },
       ], 'Add piece');
       if (!v) return;
-      outline = M.rectangle(v.w, v.h, v.r, 0, 0, 'holes');
+      outline = M.rectangle(v.w, v.h, 0, 0, 0, 'holes');
     }
     project.pieces.push(M.newPiece(`Piece ${project.pieces.length + 1}`, outline));
     selectPiece(project.pieces.length - 1);
@@ -269,34 +427,43 @@
       const v = await askLengths('Add a rectangle', [
         { key: 'w', label: 'Width', value: inch() ? 25.4 : 25, positive: true },
         { key: 'h', label: 'Height', value: inch() ? 12.7 : 12, positive: true },
-        { key: 'r', label: 'Corner radius', value: 0 },
       ], 'Add');
       if (!v) return;
-      shape = M.rectangle(v.w, v.h, v.r, c.x - v.w / 2, c.y - v.h / 2, 'none');
+      shape = M.rectangle(v.w, v.h, 0, c.x - v.w / 2, c.y - v.h / 2, 'none');
     }
-    piece().cutouts.push(shape);
-    selectShape(piece().cutouts.length - 1);
+    const sh = M.newShape(shape);
+    piece().cutouts.push(sh);
+    ui.tool = 'select';
+    ui.sel = { type: 'shape', items: [sh.id] };
     commit();
   }
 
   function selectPiece(i, doCommit = true) {
     ui.pieceIdx = Math.max(0, Math.min(project.pieces.length - 1, i));
-    ui.contour = { kind: 'outline', idx: 0 };
     ui.sel = { type: null, items: [] };
     ui.combine = null;
+    ui.highlight = null;
     if (ui.tool === 'draw') ui.tool = 'select';
     ui.view = null;
     if (doCommit) commit();
   }
 
-  function selectShape(idx) {
-    ui.contour = { kind: 'cutout', idx };
-    ui.sel = { type: 'shape', items: [] };
+  function clearSel() {
+    ui.sel = { type: null, items: [] };
+    ui.highlight = null;
   }
 
-  function clearSel() {
-    ui.contour = { kind: 'outline', idx: 0 };
-    ui.sel = { type: null, items: [] };
+  function deleteSelected() {
+    const pc = piece();
+    if (ui.sel.type === 'shape') {
+      pc.cutouts = pc.cutouts.filter((c) => !ui.sel.items.includes(c.id));
+      toast('Shape deleted. Undo brings it back.');
+    } else if (ui.sel.type === 'notch') {
+      pc.notches = pc.notches.filter((n) => !ui.sel.items.includes(n.id));
+      toast('Notch deleted. Undo brings it back.');
+    } else return;
+    clearSel();
+    commit();
   }
 
   // ---------------------------------------------------------------------
@@ -305,38 +472,48 @@
 
   function startDraw(target) {
     const pc = piece();
+    let c;
     if (target === 'outline' || !pc.outline.segments.length) {
-      ui.contour = { kind: 'outline', idx: 0 };
-    } else if (target !== 'current') {
-      pc.cutouts.push(M.newContour());
-      ui.contour = { kind: 'cutout', idx: pc.cutouts.length - 1 };
+      ui.drawTarget = 'outline';
+      c = pc.outline;
+      pc.notches = []; // they belong to the old outline's edges
+    } else if (target && target !== 'new') {
+      ui.drawTarget = target;
+      c = shapeById(target);
+    } else {
+      const sh = M.newShape(M.newContour());
+      pc.cutouts.push(sh);
+      ui.drawTarget = sh.id;
+      c = sh;
     }
-    const c = contour();
+    const isOut = ui.drawTarget === 'outline';
     c.start = null;
     c.segments = [];
-    c.closing = { mode: isOutline() ? 'holes' : 'none', fillet: 0, corner: true };
+    c.closing = { mode: isOut ? 'holes' : 'none', fillet: 0, corner: true };
     ui.sel = { type: null, items: [] };
     ui.tool = 'draw';
     commit();
   }
 
   function finishDraw() {
-    const c = contour();
+    const c = drawContour();
+    const isOut = ui.drawTarget === 'outline';
     ui.tool = 'select';
     if (c.segments.length < 2) {
-      if (!isOutline()) {
-        piece().cutouts.splice(ui.contour.idx, 1);
+      if (!isOut) {
+        piece().cutouts = piece().cutouts.filter((x) => x !== c);
         clearSel();
       }
       toast('A shape needs at least two lines.');
-    } else if (!isOutline()) {
-      ui.sel = { type: 'shape', items: [] };
+    } else if (!isOut) {
+      ui.sel = { type: 'shape', items: [c.id] };
     }
+    ui.drawTarget = 'outline';
     commit();
   }
 
   function snapPoint(pt) {
-    const c = contour();
+    const c = drawContour();
     const s = ui.view.scale;
     if (ui.tool === 'draw' && c.start && c.segments.length >= 2 && G.dist(pt, c.start) * s < 12) {
       return { ...c.start, closes: true };
@@ -357,7 +534,7 @@
   }
 
   function addDrawPoint(world) {
-    const c = contour();
+    const c = drawContour();
     const pt = snapPoint(world);
     if (!c.start) {
       c.start = { x: pt.x, y: pt.y };
@@ -372,7 +549,7 @@
     const d = G.sub(pt, end);
     const L = G.len(d);
     if (L < 1e-6) return;
-    const mode = isOutline() ? 'holes' : 'none';
+    const mode = ui.drawTarget === 'outline' ? 'holes' : 'none';
     c.segments.push(M.seg('line', { length: round(L), angle: round(((G.deg(Math.atan2(d.y, d.x)) % 360) + 360) % 360), mode }));
     commit();
   }
@@ -380,35 +557,38 @@
   // ---------------------------------------------------------------------
   // Selection-driven edits
 
-  function selectedEdges() {
-    return ui.sel.type === 'edge' ? ui.sel.items : [];
-  }
-  function selectedCorners() {
-    return ui.sel.type === 'corner' ? ui.sel.items : [];
-  }
+  const selected = (type) => (ui.sel.type === type ? ui.sel.items : []);
 
-  // Corners that can be rounded: both neighbouring edges are straight.
-  function roundable(c, src) {
-    const edges = G.buildEdges(c);
-    const i = edges.findIndex((e) => e.edge === src);
-    if (i < 0 || edges.length < 2) return false;
-    const prev = edges[(i - 1 + edges.length) % edges.length];
-    return prev.type === 'line' && edges[i].type === 'line';
-  }
-
-  function setModes(c, srcs, mode) {
-    srcs.forEach((s) => {
-      edgeProps(c, s).mode = mode;
+  function setModes(refs, mode) {
+    refs.forEach((r) => {
+      const t = edgeTarget(r);
+      if (t) t.mode = mode;
     });
   }
 
-  function setFillets(c, srcs, r) {
-    srcs.filter((s) => roundable(c, s)).forEach((s) => {
-      edgeProps(c, s).fillet = r;
+  function setFillets(vrefs, r) {
+    vrefs.forEach((v) => {
+      const t = cornerTarget(v);
+      if (t) t.fillet = r;
     });
   }
 
-  const allEdgeIds = (c) => G.buildEdges(c).map((e) => e.edge);
+  // Refs of every edge whose mode can be set on a contour.
+  function contourEdgeRefs(lc) {
+    const seen = new Set();
+    lc.contour.segments.forEach((s) => {
+      if (s.ref && !s.ref.startsWith('n:')) seen.add(s.ref);
+    });
+    return [...seen];
+  }
+
+  // Outline edges, notches included through the edge they sit on.
+  function outlineEdgeRefs() {
+    return G.buildEdges(piece().outline).map((e) => `o:${e.edge}`);
+  }
+  function shapeEdgeRefs(sh) {
+    return G.buildEdges(sh).map((e) => `c:${sh.id}:${e.edge}`);
+  }
 
   // ---------------------------------------------------------------------
   // Canvas
@@ -418,7 +598,7 @@
   function fitView() {
     const w = svg.clientWidth || 800;
     const h = svg.clientHeight || 600;
-    let b = Lay.pieceBBox(Lay.layoutPiece(project, piece()));
+    let b = Lay.pieceBBox(curLay());
     if (!b || b.maxX - b.minX < 1e-6) b = { minX: -20, minY: -20, maxX: 180, maxY: 130 };
     const bw = Math.max(b.maxX - b.minX, 20);
     const bh = Math.max(b.maxY - b.minY, 20);
@@ -452,6 +632,20 @@
     return out.join('');
   }
 
+
+  function sectionPath(sec) {
+    // Points along an adjusted spacing section, for highlighting.
+    const L = G.pathLength(sec.path);
+    const pts = [];
+    const steps = 48;
+    for (let k = 0; k <= steps; k++) {
+      let s = sec.from + ((sec.to - sec.from) * k) / steps;
+      if (sec.closed) s = ((s % L) + L) % L;
+      pts.push(G.pathPointAt(sec.path, s));
+    }
+    return pts.map((p, i) => `${i ? 'L' : 'M'}${num(p.x)} ${num(-p.y)}`).join('');
+  }
+
   function renderCanvas() {
     const w = svg.clientWidth;
     const h = svg.clientHeight;
@@ -465,68 +659,87 @@
     const px = (n) => n / s;
     const out = [gridSvg(x0, y0, w / s, h / s, s)];
     const pc = piece();
-    const lay = Lay.layoutPiece(project, pc);
-    const active = contour();
+    const lay = curLay();
     const combining = ui.combine;
-    const contours = [
-      { c: pc.outline, lay: lay.outline, kind: 'outline', idx: 0 },
-      ...pc.cutouts.map((c, i) => ({ c, lay: lay.cutouts[i], kind: 'cutout', idx: i })),
-    ];
-    const selEdges = new Set(selectedEdges());
+    const drawing = ui.tool === 'draw';
+    const contours = [{ lc: lay.outline, kind: 'outline' }, ...lay.cutouts.map((lc) => ({ lc, kind: 'cutout' }))];
+    const selEdges = new Set(selected('edge'));
+    const selNotch = new Set(selected('notch'));
+    const selShape = new Set(selected('shape'));
+    const radii = radiiInUse(lay);
+    const refOf = (lc, p) => {
+      const sg = p.edge !== undefined ? edgeProps(lc.contour, p.edge) : null;
+      return sg && sg.ref;
+    };
 
     // Piece fill
     if (lay.outline.prims.length && !combining) {
       out.push(`<path d="${R.pathData(lay.outline.prims, flip, true)}" fill="color-mix(in srgb, var(--accent) 5%, transparent)" stroke="none"/>`);
     }
 
-    contours.forEach(({ c, lay: cl, kind, idx }) => {
-      if (combining && (kind === 'outline' || idx === combining.idx)) return;
-      const isActive = c === active;
-      if (kind === 'cutout' && !combining && ui.tool === 'select') {
-        const selected = isActive && ui.sel.type === 'shape';
-        out.push(`<path class="grab" d="${R.pathData(cl.prims, flip, true)}" fill="${selected ? 'color-mix(in srgb, var(--accent) 14%, var(--canvas))' : 'var(--canvas)'}" stroke="none" data-kind="cutout" data-ci="${idx}" data-shape="1"/>`);
-      }
-      // Selection glow under selected edges
-      if (isActive) {
-        cl.prims.forEach((p) => {
-          if (p.edge !== undefined && selEdges.has(p.edge)) {
-            out.push(`<path d="${R.pathData([p], flip, false)}" fill="none" stroke="color-mix(in srgb, var(--accent) 35%, transparent)" stroke-width="10" stroke-linecap="round" vector-effect="non-scaling-stroke"/>`);
-          }
-        });
-      }
-      if (isActive && ui.sel.type === 'shape') {
-        out.push(`<path d="${R.pathData(cl.prims, flip, true)}" fill="none" stroke="var(--accent)" stroke-width="5" stroke-opacity="0.3" vector-effect="non-scaling-stroke"/>`);
-      }
-      cl.prims.forEach((p) => {
-        out.push(`<path d="${R.pathData([p], flip, false)}" fill="none" stroke="var(--edge-${p.mode === 'holes' ? 'none' : p.mode})" stroke-width="${isActive ? 2 : 1.5}" vector-effect="non-scaling-stroke"/>`);
+    // Shapes combined with the outline: a dashed outline you can grab.
+    if (!combining) {
+      pc.cutouts.filter(isLiveOp).forEach((sh) => {
+        const prims = G.buildPrimitives(sh);
+        if (!prims.length) return;
+        const on = selShape.has(sh.id);
+        const d = R.pathData(prims, flip, true);
+        if (!drawing) out.push(`<path class="grab" d="${d}" fill="transparent" stroke="none" data-shape="${sh.id}"/>`);
+        out.push(`<path d="${d}" fill="${on ? 'color-mix(in srgb, var(--accent) 10%, transparent)' : 'none'}" stroke="var(--${on ? 'accent' : 'muted'})" stroke-width="${on ? 1.5 : 1}" stroke-dasharray="3 3" opacity="${on ? 1 : 0.7}" pointer-events="none" vector-effect="non-scaling-stroke"/>`);
       });
-      cl.stitch.forEach((st) => {
+    }
+
+    contours.forEach(({ lc, kind }) => {
+      if (combining && kind === 'outline') return;
+      const own = kind === 'cutout' && lc.src ? lc.src : null;
+      if (kind === 'cutout' && !combining) {
+        const on = own && selShape.has(own);
+        out.push(`<path class="${own && !drawing ? 'grab' : ''}" d="${R.pathData(lc.prims, flip, true)}" fill="${on ? 'color-mix(in srgb, var(--accent) 14%, var(--canvas))' : 'var(--canvas)'}" stroke="none" ${own ? `data-shape="${own}"` : ''}/>`);
+      }
+      // Selection glow under selected edges and notches
+      lc.prims.forEach((p) => {
+        const ref = refOf(lc, p);
+        const on = ref && (selEdges.has(ref) || (ref.startsWith('n:') && selNotch.has(ref.slice(2))));
+        if (on) out.push(`<path d="${R.pathData([p], flip, false)}" fill="none" stroke="color-mix(in srgb, var(--accent) 35%, transparent)" stroke-width="10" stroke-linecap="round" vector-effect="non-scaling-stroke"/>`);
+      });
+      if (own && selShape.has(own)) {
+        out.push(`<path d="${R.pathData(lc.prims, flip, true)}" fill="none" stroke="var(--accent)" stroke-width="5" stroke-opacity="0.3" vector-effect="non-scaling-stroke"/>`);
+      }
+      lc.prims.forEach((p) => {
+        out.push(`<path d="${R.pathData([p], flip, false)}" fill="none" stroke="var(--edge-${p.mode === 'holes' ? 'none' : p.mode})" stroke-width="${kind === 'outline' ? 2 : 1.6}" vector-effect="non-scaling-stroke"/>`);
+      });
+      lc.stitch.forEach((st) => {
         out.push(`<path d="${R.pathData(st.prims, flip, st.closed)}" fill="none" stroke="var(--edge-stitch)" stroke-width="1.4" stroke-dasharray="5 3" vector-effect="non-scaling-stroke"/>`);
       });
-      cl.holes.forEach((hp) => {
+      lc.holes.forEach((hp) => {
         out.push(`<circle cx="${num(hp.x)}" cy="${num(-hp.y)}" r="${num(lay.holeRadius)}" fill="color-mix(in srgb, var(--edge-holes) 16%, var(--canvas))" stroke="var(--edge-holes)" stroke-width="1.2" vector-effect="non-scaling-stroke"/>`);
       });
-      if (!combining && ui.tool !== 'draw') {
-        cl.prims.forEach((p) => {
-          if (p.fillet !== undefined) return;
-          out.push(`<path class="hit" d="${R.pathData([p], flip, false)}" fill="none" stroke="transparent" stroke-width="14" stroke-linecap="round" vector-effect="non-scaling-stroke" data-kind="${kind}" data-ci="${idx}" data-edge="${p.edge}"/>`);
+      if (!combining && ui.tool === 'select') {
+        lc.prims.forEach((p) => {
+          const ref = refOf(lc, p);
+          if (p.fillet !== undefined || !ref) return;
+          out.push(`<path class="hit" d="${R.pathData([p], flip, false)}" fill="none" stroke="transparent" stroke-width="14" stroke-linecap="round" vector-effect="non-scaling-stroke" data-ref="${esc(ref)}"/>`);
         });
       }
     });
 
-    // Corner dots: on the outline, and on the selected shape.
-    if (!combining && ui.tool === 'select') {
-      const selCorners = new Set(selectedCorners());
-      contours.forEach(({ c, kind, idx }) => {
-        const isActive = c === active;
-        if (kind === 'cutout' && !isActive) return;
-        G.buildEdges(c).forEach((e) => {
-          const v = G.primStart(e);
-          const vp = G.vertexProps(c, e.edge);
-          const sel = isActive && selCorners.has(e.edge);
-          const r = sel ? 6 : 4.5;
-          const fill = sel ? 'var(--accent)' : vp.corner ? 'var(--panel)' : 'var(--panel)';
-          out.push(`<circle class="vtx" cx="${num(v.x)}" cy="${num(-v.y)}" r="${num(px(r))}" fill="${fill}" stroke="var(--accent)" stroke-width="${sel ? 2 : 1.5}" ${vp.corner ? '' : 'stroke-dasharray="2 2"'} vector-effect="non-scaling-stroke" data-kind="${kind}" data-ci="${idx}" data-vertex="${e.edge}"><title>Corner ${vName(e.edge)}${vp.fillet ? `, rounded ${fmt(vp.fillet)} ${units()}` : ''}${vp.corner ? '' : ', no corner hole'}</title></circle>`);
+    // Highlighted spacing section
+    if (ui.highlight && ui.adjusted[ui.highlight - 1]) {
+      out.push(`<path d="${sectionPath(ui.adjusted[ui.highlight - 1])}" fill="none" stroke="var(--zero)" stroke-width="6" stroke-opacity="0.45" stroke-linecap="round" pointer-events="none" vector-effect="non-scaling-stroke"/>`);
+    }
+
+    // Corner dots
+    if (!combining && (ui.tool === 'select' || ui.tool === 'round')) {
+      const selC = new Set(selected('corner'));
+      const big = ui.tool === 'round';
+      contours.forEach(({ lc }) => {
+        cornersOf(lc).forEach((cn) => {
+          const sel = selC.has(cn.vref);
+          const r = big ? 6 : sel ? 6 : 4.5;
+          const col = cn.fillet > 0 ? radiusColor(cn.fillet, radii) : null;
+          const fill = sel ? 'var(--accent)' : col || 'var(--panel)';
+          const tip = `${cn.fillet ? `Rounded ${fmt(cn.fillet)} ${units()}` : 'Sharp corner'}${cn.corner ? '' : ', no corner hole'}`;
+          out.push(`<circle class="vtx" cx="${num(cn.pt.x)}" cy="${num(-cn.pt.y)}" r="${num(px(r))}" fill="${fill}" stroke="${col && !sel ? 'var(--panel)' : 'var(--accent)'}" stroke-width="${sel ? 2 : 1.5}" ${cn.corner ? '' : 'stroke-dasharray="2 2"'} vector-effect="non-scaling-stroke" data-vref="${esc(cn.vref)}"><title>${tip}</title></circle>`);
         });
       });
     }
@@ -542,23 +755,25 @@
       });
     }
 
-    // Zero point
-    if (pc.zero.enabled) {
-      const z = G.pointOnEdge(pc.outline, pc.zero.edge, pc.zero.offset);
-      if (z) {
-        const r = px(7);
-        out.push(`<g stroke="var(--zero)" stroke-width="2" fill="none" pointer-events="none">
-          <circle cx="${num(z.x)}" cy="${num(-z.y)}" r="${num(r)}" vector-effect="non-scaling-stroke"/>
-          <path d="M${num(z.x - r * 1.6)} ${num(-z.y)}H${num(z.x + r * 1.6)}M${num(z.x)} ${num(-z.y - r * 1.6)}V${num(-z.y + r * 1.6)}" vector-effect="non-scaling-stroke"/></g>`);
-      }
-    }
+    // Origin points
+    contours.forEach(({ lc }) => {
+      const o = lc.origin;
+      if (!o) return;
+      const z = o.pt;
+      const r = px(7);
+      const tick = o.kind === 'stitch' ? Lay.originTick(o, Math.max(px(9), 3)) : null;
+      out.push(`<g stroke="var(--zero)" stroke-width="2" fill="none" pointer-events="none">
+        <circle cx="${num(z.x)}" cy="${num(-z.y)}" r="${num(o.kind === 'hole' ? Math.max(r, lay.holeRadius + px(4)) : r)}" vector-effect="non-scaling-stroke"/>
+        ${tick ? `<path d="M${num(tick.a.x)} ${num(-tick.a.y)}L${num(tick.b.x)} ${num(-tick.b.y)}" stroke-width="3" vector-effect="non-scaling-stroke"/>` : `<path d="M${num(z.x - r * 1.7)} ${num(-z.y)}H${num(z.x + r * 1.7)}M${num(z.x)} ${num(-z.y - r * 1.7)}V${num(-z.y + r * 1.7)}" vector-effect="non-scaling-stroke"/>`}</g>`);
+    });
 
     // Drawing preview
-    if (ui.tool === 'draw') {
-      const c = active;
+    if (drawing) {
+      const c = drawContour();
       if (c.start) {
         let end = c.start;
         G.buildEdges(c).filter((e) => !e.closing).forEach((e) => {
+          out.push(`<path d="${R.pathData([e], flip, false)}" fill="none" stroke="var(--accent)" stroke-width="2" vector-effect="non-scaling-stroke"/>`);
           end = G.primEnd(e);
         });
         out.push(`<circle cx="${num(c.start.x)}" cy="${num(-c.start.y)}" r="${num(px(7))}" fill="var(--panel)" stroke="var(--accent)" stroke-width="2" vector-effect="non-scaling-stroke"/>`);
@@ -580,7 +795,7 @@
   }
 
   function renderHint() {
-    const c = contour();
+    const c = drawContour();
     let msg = '';
     if (ui.tool === 'draw') {
       msg = !c.start
@@ -588,14 +803,18 @@
         : 'Click to add points · Shift for 15° steps · click the first point or press Enter to finish · Backspace removes the last line';
     } else if (ui.combine) {
       msg = 'Click lines to keep (solid) or remove (dashed), then Apply.';
-    } else if (ui.tool === 'zero') {
-      msg = 'Click a spot on the outline to place the zero point.';
+    } else if (ui.tool === 'origin') {
+      msg = 'Click a hole or a stitch line to make it the origin point · Esc to cancel';
+    } else if (ui.tool === 'round') {
+      msg = `Click corners to round them ${fmt(ui.brush || 0)} ${units()} · click again to make sharp · Esc when done`;
     } else if (ui.sel.type === 'edge' || ui.sel.type === 'corner') {
       msg = 'Shift-click to select more · Esc to deselect';
     } else if (ui.sel.type === 'shape') {
       msg = 'Drag to move · Delete to remove';
+    } else if (ui.sel.type === 'notch') {
+      msg = 'Change the notch on the right · Delete to remove';
     } else {
-      msg = 'Click an edge or corner to change it · Shift-click to pick several · drag to pan, scroll to zoom';
+      msg = 'Click an edge, corner or shape to change it · drag to pan, scroll to zoom';
     }
     $('#hint').textContent = msg;
   }
@@ -604,6 +823,50 @@
     const pct = $('#zoomPct');
     // 100% = true size on a 96 dpi screen.
     if (pct && ui.view) pct.textContent = `${Math.round((ui.view.scale / (96 / 25.4)) * 100)}%`;
+  }
+
+  // Origin tool: snap to the nearest hole, or else onto a stitch line.
+  function placeOrigin(world) {
+    const lay = curLay();
+    const pc = piece();
+    const tol = 14 / ui.view.scale;
+    let best = null;
+    const contours = [{ lc: lay.outline, src: 'outline' }, ...lay.cutouts.map((lc) => ({ lc, src: lc.src }))];
+    contours.forEach(({ lc, src }) => {
+      lc.holes.forEach((hp) => {
+        const d = G.dist(hp, world);
+        if (d <= Math.max(tol, lay.holeRadius) && (!best || d < best.d)) best = { d, pt: hp, src };
+      });
+    });
+    if (!best) {
+      contours.forEach(({ lc, src }) => {
+        lc.stitch.forEach((st) => {
+          const n = G.nearestOnPath(st.prims, world);
+          if (n && n.d <= tol && (!best || n.d < best.d)) best = { d: n.d, pt: n.pt, src };
+        });
+      });
+    }
+    if (!best) {
+      toast('Click a hole or a stitch line.');
+      return;
+    }
+    if (!best.src) {
+      toast('That cutout comes from combining shapes, so it can’t have its own origin.');
+      return;
+    }
+    const target = best.src === 'outline' ? pc.outline : shapeById(best.src);
+    target.origin = { x: round(best.pt.x), y: round(best.pt.y) };
+    ui.tool = 'select';
+    commit();
+  }
+
+  // Round tool: give the corner the brush radius, or make it sharp again.
+  function brushCorner(vref) {
+    const t = cornerTarget(vref);
+    if (!t) return;
+    const r = ui.brush || 0;
+    t.fillet = Math.abs((Number(t.fillet) || 0) - r) < 1e-6 ? 0 : r;
+    commit();
   }
 
   function handleCanvasClick(target, world, shiftKey) {
@@ -621,17 +884,14 @@
       }
       return;
     }
-    const el = target && target.closest ? target.closest('[data-edge],[data-vertex],[data-shape]') : null;
-    if (ui.tool === 'zero') {
-      if (!el || el.dataset.kind !== 'outline' || el.dataset.edge === undefined) {
-        toast('Click an edge of the outline.');
-        return;
-      }
-      const src = Number(el.dataset.edge);
-      const e = G.buildEdges(piece().outline).find((x) => x.edge === src);
-      piece().zero = { enabled: true, edge: src, offset: round(G.projectOnPrim(e, world)) };
-      ui.tool = 'select';
-      commit();
+    if (ui.tool === 'origin') {
+      placeOrigin(world);
+      return;
+    }
+    const el = target && target.closest ? target.closest('[data-ref],[data-vref],[data-shape]') : null;
+    if (ui.tool === 'round') {
+      if (el && el.dataset.vref) brushCorner(el.dataset.vref);
+      else toast('Click a corner dot to round it.');
       return;
     }
     if (!el) {
@@ -639,24 +899,25 @@
       renderAll();
       return;
     }
-    const kind = el.dataset.kind;
-    const idx = Number(el.dataset.ci);
     if (el.dataset.shape) {
-      selectShape(idx);
+      ui.sel = { type: 'shape', items: [el.dataset.shape] };
       renderAll();
       return;
     }
-    const type = el.dataset.vertex !== undefined ? 'corner' : 'edge';
-    const src = Number(type === 'corner' ? el.dataset.vertex : el.dataset.edge);
-    const same = ui.contour.kind === kind && (kind === 'outline' || ui.contour.idx === idx) && ui.sel.type === type;
-    ui.contour = { kind, idx: kind === 'outline' ? 0 : idx };
-    if (shiftKey && same) {
+    if (el.dataset.ref && el.dataset.ref.startsWith('n:')) {
+      ui.sel = { type: 'notch', items: [parseRef(el.dataset.ref).id] };
+      renderAll();
+      return;
+    }
+    const type = el.dataset.vref ? 'corner' : 'edge';
+    const ref = type === 'corner' ? el.dataset.vref : el.dataset.ref;
+    if (shiftKey && ui.sel.type === type) {
       const items = new Set(ui.sel.items);
-      if (items.has(src)) items.delete(src);
-      else items.add(src);
+      if (items.has(ref)) items.delete(ref);
+      else items.add(ref);
       ui.sel = items.size ? { type, items: [...items] } : { type: null, items: [] };
     } else {
-      ui.sel = { type, items: [src] };
+      ui.sel = { type, items: [ref] };
     }
     renderAll();
   }
@@ -667,9 +928,8 @@
       ? e.target.closest('[data-shape]')
       : null;
     if (grab) {
-      const idx = Number(grab.dataset.ci);
-      const c = piece().cutouts[idx];
-      if (c && c.start) ui.ptr.drag = { idx, start: { ...c.start } };
+      const sh = shapeById(grab.dataset.shape);
+      if (sh && sh.start) ui.ptr.drag = { id: sh.id, start: { ...sh.start }, origin: sh.origin ? { ...sh.origin } : null };
     }
     svg.setPointerCapture(e.pointerId);
   });
@@ -681,7 +941,8 @@
       const dy = e.clientY - ui.ptr.y;
       if (Math.hypot(dx, dy) > 4) ui.ptr.moved = true;
       if (ui.ptr.moved && ui.ptr.drag) {
-        const c = piece().cutouts[ui.ptr.drag.idx];
+        const d = ui.ptr.drag;
+        const sh = shapeById(d.id);
         let mx = dx / ui.view.scale;
         let my = -dy / ui.view.scale;
         if (ui.snap) {
@@ -689,8 +950,11 @@
           mx = Math.round(mx / st) * st;
           my = Math.round(my / st) * st;
         }
-        c.start = { x: round(ui.ptr.drag.start.x + mx), y: round(ui.ptr.drag.start.y + my) };
-        selectShape(ui.ptr.drag.idx);
+        if (sh) {
+          sh.start = { x: round(d.start.x + mx), y: round(d.start.y + my) };
+          if (d.origin) sh.origin = { x: d.origin.x + mx, y: d.origin.y + my };
+          ui.sel = { type: 'shape', items: [sh.id] };
+        }
       } else if (ui.ptr.moved) {
         ui.view.cx = ui.ptr.cx - dx / ui.view.scale;
         ui.view.cy = ui.ptr.cy + dy / ui.view.scale;
@@ -734,8 +998,22 @@
     { passive: false }
   );
 
+
   // ---------------------------------------------------------------------
   // Tool rail and zoom
+
+  function setTool(tool) {
+    if (ui.combine) ui.combine = null;
+    if (ui.tool === 'draw' && tool !== 'draw') finishDraw();
+    if (tool === 'draw') {
+      if (ui.tool !== 'draw') startDraw();
+      return;
+    }
+    if (tool === 'round' && !(ui.brush > 0)) ui.brush = inch() ? 25.4 / 8 : 3;
+    ui.tool = ui.tool === tool && tool !== 'select' ? 'select' : tool;
+    if (ui.tool !== 'select') clearSel();
+    renderAll();
+  }
 
   function renderRail() {
     const btn = (attrs, ic, tip, on) => `<button class="icon-btn ${on ? 'on' : ''}" ${attrs} data-tip="${tip}" aria-label="${tip}">${icon(ic)}</button>`;
@@ -746,7 +1024,8 @@
       btn('data-add="rect"', 'rect', 'Add a rectangle', false),
       btn('data-add="circle"', 'circle', 'Add a circle', false),
       '<hr>',
-      btn('data-tool="zero"', 'target', 'Place zero point', ui.tool === 'zero'),
+      btn('data-tool="round"', 'corner', 'Round corners (R)', ui.tool === 'round'),
+      btn('data-tool="origin"', 'target', 'Place origin point (O)', ui.tool === 'origin'),
       btn('data-snap="1"', 'magnet', ui.snap ? 'Snap to grid: on' : 'Snap to grid: off', ui.snap),
     ].join('');
     $('#zoom').innerHTML = `
@@ -759,17 +1038,8 @@
   $('#rail').addEventListener('click', (e) => {
     const b = e.target.closest('button');
     if (!b) return;
-    if (b.dataset.tool) {
-      const tool = b.dataset.tool;
-      if (ui.combine) ui.combine = null;
-      if (tool === 'draw') {
-        if (ui.tool !== 'draw') startDraw();
-        return;
-      }
-      if (ui.tool === 'draw') finishDraw();
-      ui.tool = tool;
-      renderAll();
-    } else if (b.dataset.add) {
+    if (b.dataset.tool) setTool(b.dataset.tool);
+    else if (b.dataset.add) {
       if (ui.tool === 'draw') finishDraw();
       addShape(b.dataset.add);
     } else if (b.dataset.snap) {
@@ -788,33 +1058,95 @@
   });
 
   // ---------------------------------------------------------------------
-  // Left sidebar: pieces and stitching settings
+  // Left sidebar: pieces, and one Stitching section for the whole project
+  // (sizes, hole count and spacing check, origin points).
 
   function thumb(pc) {
-    const prims = G.buildPrimitives(pc.outline);
+    let lay;
+    try {
+      lay = Lay.layoutPiece(project, pc);
+    } catch (e) {
+      return '';
+    }
+    const prims = lay.outline.prims;
     const b = G.bbox(prims);
     if (!b) return '';
     const w = Math.max(b.maxX - b.minX, 1);
     const h = Math.max(b.maxY - b.minY, 1);
     const pad = Math.max(w, h) * 0.08;
-    const holes = pc.cutouts.map((c) => R.pathData(G.buildPrimitives(c), flip, true)).join('');
+    const holes = lay.cutouts.map((c) => R.pathData(c.prims, flip, true)).join('');
     return `<svg viewBox="${num(b.minX - pad)} ${num(-b.maxY - pad)} ${num(w + 2 * pad)} ${num(h + 2 * pad)}" preserveAspectRatio="xMidYMid meet"><path d="${R.pathData(prims, flip, true)}${holes}" fill-rule="evenodd" vector-effect="non-scaling-stroke"/></svg>`;
   }
 
   function sizeText(c) {
-    const b = contourBox(c);
-    return b ? `${fmt(b.maxX - b.minX)} × ${fmt(b.maxY - b.minY)} ${units()}` : 'Empty';
+    const b = RS.rawBox(c);
+    if (!b) return 'Empty';
+    if (RS.isCircle(c)) return `${fmt(b.maxX - b.minX)} ${units()} circle`;
+    return `${fmt(b.maxX - b.minX)} × ${fmt(b.maxY - b.minY)} ${units()}`;
   }
 
-  function settingsFields(obj, prefix) {
+  function settingsFields(obj) {
     return [
       ['holeDiameter', 'Hole size', 'Diameter of your round punch'],
       ['spacing', 'Spacing', 'Centre to centre of neighbouring holes'],
       ['edgeDistance', 'From edge', 'Gap between the hole and the leather edge'],
       ['stitchOffset', 'Stitch line', 'Distance of the stitch line from the edge'],
     ]
-      .map(([k, label, tip]) => `<label class="fld" title="${tip}"><span>${label}</span>${numInput(`data-set="${prefix}" data-key="${k}"`, obj[k])}</label>`)
+      .map(([k, label, tip]) => `<label class="fld" title="${tip}"><span>${label}</span>${numInput(`data-set="d_" data-key="${k}"`, obj[k])}</label>`)
       .join('');
+  }
+
+  function originLabel(o) {
+    if (!o) return 'Not set';
+    return o.kind === 'hole' ? 'On a hole' : 'On the stitch line';
+  }
+
+  function stitchSection() {
+    const d = project.defaults;
+    const lay = curLay();
+    const pc = piece();
+    const all = [lay.outline, ...lay.cutouts];
+    const holes = all.reduce((n, c) => n + c.holes.length, 0);
+    ui.adjusted = [];
+    all.forEach((c) => c.sections.forEach((s) => {
+      if (s.actual && Math.abs(s.actual - s.requested) > 0.005) ui.adjusted.push(s);
+    }));
+    const adj = ui.adjusted;
+    const origins = [];
+    if (pc.outline.segments.length) origins.push({ label: 'Outline', key: 'outline', set: !!pc.outline.origin, lay: lay.outline });
+    lay.cutouts.forEach((lc) => {
+      if (!lc.src) return;
+      const sh = shapeById(lc.src);
+      if (sh && sh.origin) origins.push({ label: `Shape ${shapeNo(sh.id)}`, key: sh.id, set: true, lay: lc });
+    });
+    const anyOrigin = origins.some((o) => o.set);
+    const summary = [`${fmt(d.holeDiameter)} ${units()} holes`, `${fmt(d.spacing)} ${units()} apart`, holes ? `${holes} holes` : null, anyOrigin ? 'origin set' : null]
+      .filter(Boolean)
+      .join(' · ');
+    const check = !holes
+      ? '<p class="note">No edges have holes yet. Click an edge and choose Holes.</p>'
+      : adj.length
+        ? `<details class="check" id="checkDetails" ${ui.checkOpen ? 'open' : ''}>
+            <summary>${holes} holes · ${adj.length} run${adj.length === 1 ? '' : 's'} adjusted slightly</summary>
+            <p class="note">Spacing on these runs is stretched or squeezed a little so a hole lands on each corner. Click one to see it.</p>
+            ${adj.map((s, i) => `<button class="run ${ui.highlight === i + 1 ? 'on' : ''}" data-run="${i + 1}">${fmt(s.length)} ${units()} run · ${fmt(s.actual)} apart</button>`).join('')}
+          </details>`
+        : `<div class="ok">${icon('check')} ${holes} holes, all at exactly ${fmt(d.spacing)} ${units()}</div>`;
+    const originRows = origins
+      .map((o) => `<div class="origin-row"><span><b>${esc(o.label)}</b> <span class="muted">${o.set ? originLabel(o.lay.origin) : 'Not set'}</span></span>
+          ${o.set ? `<button class="icon-btn" data-clear-origin="${esc(o.key)}" title="Remove" aria-label="Remove origin">${icon('x')}</button>` : ''}</div>`)
+      .join('');
+    return `<details class="stitch-panel" id="stitchPanel" ${ui.stitchOpen ? 'open' : ''}>
+      <summary><span class="t">Stitching</span><span class="sum">${esc(summary)}</span></summary>
+      <div class="body">
+        <div class="grid2">${settingsFields(d)}</div>
+        <div class="sub-h">Hole count</div>
+        ${check}
+        <div class="sub-h">Origin point</div>
+        ${originRows}
+        <button class="small ${ui.tool === 'origin' ? 'primary' : ''}" data-tool-start="origin">${icon('target')} ${ui.tool === 'origin' ? 'Click a hole or stitch line…' : 'Place origin point'}</button>
+        <p class="note">A hole always lands on the origin, or a tick marks it on a stitch line, so pieces that share one line up.</p>
+      </div></details>`;
   }
 
   function renderLeft() {
@@ -839,9 +1171,14 @@
         </div>
       </div>
       <div class="pieces">${pieces}</div>
-      <div class="section-title">Stitching</div>
-      <div class="card"><div class="grid2">${settingsFields(project.defaults, 'd_')}</div>
-        <p class="note">Used by every piece unless a piece has its own.</p></div>`;
+      ${stitchSection()}`;
+    const sp = $('#stitchPanel');
+    sp.addEventListener('toggle', () => {
+      ui.stitchOpen = sp.open;
+      setPref('stitchOpen', sp.open);
+    });
+    const cd = $('#checkDetails');
+    if (cd) cd.addEventListener('toggle', () => (ui.checkOpen = cd.open));
   }
 
   $('#leftPanel').addEventListener('click', async (e) => {
@@ -872,12 +1209,33 @@
       toast('Piece deleted. Undo brings it back.');
       return;
     }
+    if (t.dataset.run) {
+      const k = Number(t.dataset.run);
+      ui.highlight = ui.highlight === k ? null : k;
+      renderLeft();
+      renderCanvas();
+      return;
+    }
+    if (t.dataset.clearOrigin) {
+      const k = t.dataset.clearOrigin;
+      if (k === 'outline') delete piece().outline.origin;
+      else {
+        const sh = shapeById(k);
+        if (sh) delete sh.origin;
+      }
+      commit();
+      return;
+    }
+    if (t.dataset.toolStart) {
+      setTool(t.dataset.toolStart);
+      return;
+    }
     if (t.dataset.piece !== undefined) selectPiece(Number(t.dataset.piece));
   });
 
-  function parseInto(t, assign) {
+  function parseInto(t, assign, positive = false) {
     const v = M.parseLength(t.value, units());
-    if (!Number.isFinite(v) || v < 0) {
+    if (!Number.isFinite(v) || v < 0 || (positive && v <= 0)) {
       t.classList.add('bad');
       toast('That size isn’t valid.');
       return;
@@ -907,20 +1265,22 @@
   }
 
   function commonValue(list) {
-    return list.length && list.every((v) => v === list[0]) ? list[0] : null;
+    return list.length && list.every((v) => Math.abs(v - list[0]) < 1e-9 || v === list[0]) ? list[0] : null;
   }
 
-  const RADIUS_CHIPS = { mm: [0, 2, 3, 5, 10], in: [0, 1 / 16, 1 / 8, 1 / 4, 1 / 2] };
-  const chipLabel = (v) => (inch() ? ({ 0: '0', 0.0625: '1/16', 0.125: '1/8', 0.25: '1/4', 0.5: '1/2' })[v] : String(v));
+  const RADIUS_CHIPS = { mm: [2, 3, 5, 8, 10], in: [1 / 16, 1 / 8, 3 / 16, 1 / 4, 1 / 2] };
+  const chipLabel = (v) => (inch() ? ({ 0.0625: '1/16', 0.125: '1/8', 0.1875: '3/16', 0.25: '1/4', 0.5: '1/2' })[v] || String(v) : String(v));
 
-  function radiusControl(value, scope) {
+  // Slider, typed size and quick sizes. scope: 'brush' | 'sel' | 'notch'.
+  function radiusControl(value, scope, withZero = false) {
     const max = inch() ? 50.8 : 50;
     const step = inch() ? 25.4 / 32 : 0.5;
-    const chips = RADIUS_CHIPS[units()]
+    const list = (withZero ? [0] : []).concat(RADIUS_CHIPS[units()]);
+    const chips = list
       .map((v) => {
         const mm = inch() ? v * 25.4 : v;
         const on = value !== null && Math.abs(value - mm) < 1e-6;
-        return `<button class="${on ? 'on' : ''}" data-radius="${mm}" data-scope="${scope}">${chipLabel(v)}${v && !inch() ? '' : ''}</button>`;
+        return `<button class="${on ? 'on' : ''}" data-radius="${mm}" data-scope="${scope}">${chipLabel(v)}</button>`;
       })
       .join('');
     return `<div class="slider-row">
@@ -930,24 +1290,38 @@
       <div class="chips">${chips}<span class="muted" style="font-size:12px;align-self:center">${units()}</span></div>`;
   }
 
-  function spacingCheck(cl) {
-    if (!cl) return '';
-    const adjusted = cl.sections.filter((s) => s.actual && Math.abs(s.actual - s.requested) > 0.005);
-    const n = cl.holes.length;
-    if (!n) return '';
-    return `<div class="card"><h4>${icon('check')} ${n} hole${n === 1 ? '' : 's'}</h4>${
-      adjusted.length
-        ? adjusted.map((s) => `<div class="warn">A ${fmt(s.length)} ${units()} run is spaced ${fmt(s.actual)} ${units()} (you set ${fmt(s.requested)}) so holes land on the corners.</div>`).join('')
-        : '<div class="ok">Every run uses your exact spacing.</div>'
-    }</div>`;
+  // Legend of the radii in use, coloured like the corner dots.
+  function radiusLegend() {
+    const corners = allCorners();
+    const radii = radiiInUse();
+    if (!radii.length) return '<p class="note">No rounded corners yet.</p>';
+    return `<div class="radius-legend">${radii
+      .map((r) => {
+        const n = corners.filter((c) => Math.abs(c.fillet - r) < 1e-6).length;
+        return `<button data-radius="${r}" data-scope="brush" title="Use this size"><i style="background:${radiusColor(r, radii)}"></i>${fmt(r)} ${units()} <span class="muted">· ${n} corner${n === 1 ? '' : 's'}</span></button>`;
+      })
+      .join('')}</div>`;
   }
 
-  function advancedSection(c) {
+  // Width and height boxes (or diameter for a circle).
+  function sizeCard(c, prefix) {
+    const b = RS.rawBox(c);
+    if (!b) return '';
+    if (RS.isCircle(c)) {
+      return `<div class="card"><h4>${icon('resize')} Size</h4><label class="fld"><span>Diameter</span>${numInput(`data-size="${prefix}" data-dim="d"`, b.maxX - b.minX)}</label></div>`;
+    }
+    return `<div class="card"><h4>${icon('resize')} Size</h4><div class="grid2">
+        <label class="fld"><span>Width</span>${numInput(`data-size="${prefix}" data-dim="w"`, b.maxX - b.minX)}</label>
+        <label class="fld"><span>Height</span>${numInput(`data-size="${prefix}" data-dim="h"`, b.maxY - b.minY)}</label></div>
+      <p class="note">Edges stretch; rounded corners${prefix === 'piece' ? ', notches and shapes' : ''} keep their size.</p></div>`;
+  }
+
+  function advancedSection(c, selIdx) {
     const n = c.segments.length;
     const closing = G.closingEdge(c);
     const inp = (i, key, val, isLen = true) =>
       `<input type="text" inputmode="decimal" data-seg="${i}" data-key="${key}" value="${isLen ? fmt(val) : num(Number(val) || 0)}">`;
-    const selE = new Set(selectedEdges());
+    const selE = new Set(selIdx || []);
     const rows = c.segments
       .map((s, i) => {
         const a = s.type === 'arc';
@@ -980,99 +1354,164 @@
       </div></details>`;
   }
 
+  // The contour that "Exact dimensions" edits right now.
+  function advContour() {
+    if (ui.sel.type === 'shape') return shapeById(ui.sel.items[0]);
+    return piece().outline;
+  }
+
   function renderPieceInspector() {
     const pc = piece();
     const c = pc.outline;
-    const ids = allEdgeIds(c);
-    const lay = Lay.layoutPiece(project, pc);
-    const modes = ids.map((s) => edgeProps(c, s).mode || 'none');
-    const roundIds = ids.filter((s) => roundable(c, s));
-    const fil = commonValue(roundIds.map((s) => Number(edgeProps(c, s).fillet) || 0));
-    const corners = ids.map((s) => edgeProps(c, s).corner !== false);
-    const eff = Lay.pieceSettings(project, pc);
-    const outlineEdges = G.buildEdges(c);
-    const zeroEdge = outlineEdges.find((e) => e.edge === pc.zero.edge);
+    const lay = curLay();
     if (!c.segments.length) {
       return `${head('piece', pc.name, 'No outline yet', true)}
         <div class="tip">${icon('info')}<div>Pick <b>Draw</b> in the tool bar and click points on the grid, or start from a shape.</div></div>
-        <button class="primary block" data-tool-start="draw">${icon('pen')} Draw the outline</button>`;
+        <button class="primary block" data-tool-start="draw-outline">${icon('pen')} Draw the outline</button>`;
     }
+    const refs = outlineEdgeRefs();
+    const modes = refs.map((r) => (edgeTarget(r) || {}).mode || 'none');
+    const corners = cornersOf(lay.outline);
+    const allOn = corners.length && corners.every((x) => x.corner);
     return `${head('piece', pc.name, sizeText(c), true)}
-      <div class="tip">${icon('info')}<div>Click any edge or corner on the drawing to change just that one. Shift-click to pick several.</div></div>
-      <div class="card"><h4>${icon('edge')} All edges</h4>${modeSeg(commonValue(modes), 'data-allmode')}</div>
-      ${roundIds.length ? `<div class="card"><h4>${icon('corner')} Round all corners</h4>${radiusControl(fil, 'all')}</div>` : ''}
-      ${ids.length > 1 ? `<div class="card"><label class="switch"><span>Hole on every corner</span><input type="checkbox" id="allCorners" ${corners.every(Boolean) ? 'checked' : ''}></label>
-        <p class="note">Spacing adjusts slightly so a hole lands exactly on each corner.</p></div>` : ''}
-      ${spacingCheck(lay.outline)}
-      <div class="card"><label class="switch"><span>Zero point</span><input type="checkbox" id="zeroOn" ${pc.zero.enabled ? 'checked' : ''}></label>
-        ${pc.zero.enabled ? `<div class="grid2" style="margin-top:8px">
-            <label class="fld"><span>On edge</span><select id="zeroEdge">${outlineEdges.map((e) => `<option value="${e.edge}" ${e.edge === pc.zero.edge ? 'selected' : ''}>Edge ${e.edge + 1}</option>`).join('')}</select></label>
-            <label class="fld"><span>From its start${zeroEdge ? ` (of ${fmt(G.primLength(zeroEdge))})` : ''}</span>${numInput('id="zeroOffset"', pc.zero.offset)}</label></div>
-          <div class="row" style="margin-top:8px"><button class="small" data-tool-start="zero">${icon('target')} Pick on drawing</button></div>` : ''}
-        <p class="note">A hole always lands on the zero point, so pieces that share one line up when stacked.</p></div>
-      <div class="card"><label class="switch"><span>Own stitching sizes for this piece</span><input type="checkbox" id="customSettings" ${pc.customSettings ? 'checked' : ''}></label>
-        ${pc.customSettings ? `<div class="grid2" style="margin-top:8px">${settingsFields(eff, 'p_')}</div>` : ''}</div>
+      ${sizeCard(c, 'piece')}
+      <div class="card"><h4>${icon('edge')} All edges</h4>${modeSeg(commonValue(modes), 'data-allmode')}
+        <p class="note">Or click one edge on the drawing to set just that one.</p></div>
+      <div class="card"><h4>${icon('corner')} Round corners</h4>
+        ${radiusControl(ui.brush, 'brush')}
+        <p class="note">Pick a size, then click the corner dots you want rounded. Click a corner again to make it sharp.</p>
+        ${radiusLegend()}</div>
+      ${corners.length > 1 ? `<div class="card"><label class="switch"><span>Hole on every corner</span><input type="checkbox" id="allCorners" ${allOn ? 'checked' : ''}></label>
+        <p class="note">Spacing adjusts slightly so a hole lands exactly on each corner. Click a corner to turn just that one off.</p></div>` : ''}
       ${advancedSection(c)}`;
   }
 
+  function renderRoundInspector() {
+    return `${head('corner', 'Round corners', ui.brush > 0 ? `${fmt(ui.brush)} ${units()}` : 'Sharp')}
+      <div class="tip">${icon('info')}<div>Click corner dots on the drawing to give them this radius. Click a corner again to make it sharp. Pick another size to keep going.</div></div>
+      <div class="card"><h4>Radius</h4>${radiusControl(ui.brush, 'brush')}</div>
+      <div class="card"><h4>In use</h4>${radiusLegend()}</div>
+      <button class="primary" data-tool-start="select">${icon('check')} Done</button>`;
+  }
+
+  function edgeLabel(ref) {
+    const r = parseRef(ref);
+    return r.kind === 'o' || r.kind === 'c' ? `Edge ${r.idx + 1}` : 'Edge';
+  }
+
   function renderEdgeInspector() {
-    const c = contour();
-    const items = selectedEdges();
-    const modes = items.map((s) => edgeProps(c, s).mode || 'none');
+    const items = selected('edge');
+    const modes = items.map((r) => (edgeTarget(r) || {}).mode || 'none');
     const one = items.length === 1 ? items[0] : null;
     let detail = '';
-    if (one !== null) {
-      const e = G.buildEdges(c).find((x) => x.edge === one);
-      const s = c.segments[one];
+    let notchBtn = '';
+    if (one) {
+      const r = parseRef(one);
+      const c = r.kind === 'o' ? piece().outline : r.kind === 'c' ? shapeById(r.id) : null;
+      const s = c && c.segments[r.idx];
+      const e = c && G.buildEdges(c).find((x) => x.edge === r.idx);
       if (s) {
         detail = s.type === 'arc'
-          ? `<div class="grid2"><label class="fld"><span>Radius</span>${numInput(`data-seg="${one}" data-key="radius"`, s.radius)}</label>
-             <label class="fld"><span>Sweep °</span><input type="text" inputmode="decimal" data-seg="${one}" data-key="sweep" value="${num(Number(s.sweep))}"></label></div>`
-          : `<div class="grid2"><label class="fld"><span>Length</span>${numInput(`data-seg="${one}" data-key="length"`, s.length)}</label>
-             <label class="fld"><span>Angle °</span><input type="text" inputmode="decimal" data-seg="${one}" data-key="angle" value="${num(Number(s.angle))}"></label></div>`;
+          ? `<div class="grid2"><label class="fld"><span>Radius</span>${numInput(`data-eseg="${esc(one)}" data-key="radius"`, s.radius)}</label>
+             <label class="fld"><span>Sweep °</span><input type="text" inputmode="decimal" data-eseg="${esc(one)}" data-key="sweep" value="${num(Number(s.sweep))}"></label></div>`
+          : `<div class="grid2"><label class="fld"><span>Length</span>${numInput(`data-eseg="${esc(one)}" data-key="length"`, s.length)}</label>
+             <label class="fld"><span>Angle °</span><input type="text" inputmode="decimal" data-eseg="${esc(one)}" data-key="angle" value="${num(Number(s.angle))}"></label></div>`;
       } else if (e) {
         detail = `<p class="ok">Closing edge, ${fmt(G.primLength(e))} ${units()} long. It joins the last point back to the start.</p>`;
       }
+      if (r.kind === 'o' && e && e.type === 'line') {
+        notchBtn = `<div class="card"><h4>${icon('notch')} Notch</h4>
+          <button class="small" id="addNotch">${icon('plus')} Add a notch to this edge</button>
+          <p class="note">A thumb notch or scoop, centred on the edge. You can set its width, depth and position next.</p></div>`;
+      }
     }
-    const what = isOutline() ? 'the outline' : `shape ${ui.contour.idx + 1}`;
-    return `${head('edge', one !== null ? `Edge ${one + 1}` : `${items.length} edges`, `On ${what}`)}
+    const wheres = [...new Set(items.map(refWhere))];
+    return `${head('edge', one ? edgeLabel(one) : `${items.length} edges`, `On ${wheres.join(', ')}`)}
       <div class="card"><h4>Along this edge</h4>${modeSeg(commonValue(modes))}</div>
+      ${notchBtn}
       ${detail ? `<div class="card"><h4>Size</h4>${detail}</div>` : ''}
-      <div class="row"><button class="small" data-selall="edge">Select all edges</button><button class="small ghost" data-deselect="1">Done</button></div>`;
+      <div class="row"><button class="small" data-selall="edge">Select all outline edges</button><button class="small ghost" data-deselect="1">Done</button></div>`;
   }
 
   function renderCornerInspector() {
-    const c = contour();
-    const items = selectedCorners();
-    const okIds = items.filter((s) => roundable(c, s));
-    const fil = commonValue(okIds.map((s) => Number(edgeProps(c, s).fillet) || 0));
-    const corner = items.map((s) => edgeProps(c, s).corner !== false);
+    const items = selected('corner');
+    const targets = items.map(cornerTarget).filter(Boolean);
+    const fil = commonValue(targets.map((t) => Number(t.fillet) || 0));
+    const corner = targets.map((t) => t.corner !== false);
     const all = corner.every(Boolean);
     const none = corner.every((x) => !x);
-    const one = items.length === 1 ? items[0] : null;
-    const what = isOutline() ? 'the outline' : `shape ${ui.contour.idx + 1}`;
-    return `${head('corner', one !== null ? `Corner ${vName(one)}` : `${items.length} corners`, `On ${what}`)}
-      <div class="card"><h4>Rounded</h4>${okIds.length ? radiusControl(fil, 'sel') : ''}
-        ${okIds.length < items.length ? `<p class="note">${okIds.length ? 'Some of these corners' : 'This corner'} touch a curved edge, so ${okIds.length ? 'they' : 'it'} can’t be rounded.</p>` : ''}</div>
+    const one = items.length === 1;
+    const wheres = [...new Set(items.map(refWhere))];
+    return `${head('corner', one ? 'Corner' : `${items.length} corners`, `On ${wheres.join(', ')}`)}
+      <div class="card"><h4>Rounded</h4>${radiusControl(fil, 'sel', true)}</div>
       <div class="card"><label class="switch"><span>Hole on this corner</span><input type="checkbox" id="selCorner" ${all ? 'checked' : ''} ${!all && !none ? 'data-mixed="1"' : ''}></label>
         <p class="note">Rounded corners have no single point, so holes simply follow the curve.</p></div>
       <div class="row"><button class="small" data-selall="corner">Select all corners</button><button class="small ghost" data-deselect="1">Done</button></div>`;
   }
 
+  // Which end of an edge it starts at, in words ("left", "top", ...).
+  function edgeEnds(e) {
+    const u = G.norm(G.sub(e.b, e.a));
+    if (Math.abs(u.x) >= Math.abs(u.y)) return u.x > 0 ? ['left', 'right'] : ['right', 'left'];
+    return u.y > 0 ? ['bottom', 'top'] : ['top', 'bottom'];
+  }
+
+  function renderNotchInspector() {
+    const n = notchById(selected('notch')[0]);
+    const lay = curLay();
+    const rep = (lay.resolved.report.notches || {})[n.id] || {};
+    const e = G.buildEdges(piece().outline).find((x) => x.edge === n.edge);
+    const ends = e && e.type === 'line' ? edgeEnds(e) : ['start', 'end'];
+    const centred = n.at === null || n.at === undefined;
+    const at = rep.at !== undefined ? rep.at : n.at || 0;
+    const L = rep.edgeLength || (e ? G.primLength(e) : 0);
+    const cL = (n.corners && n.corners.L) || {};
+    const cR = (n.corners && n.corners.R) || {};
+    const fil = commonValue([Number(cL.fillet) || 0, Number(cR.fillet) || 0]);
+    const shape = Math.abs(n.depth - n.width / 2) < 1e-6 ? 'half circle' : n.depth < n.width / 2 ? 'shallow scoop' : 'oblong';
+    const warn = rep.ok === false
+      ? `<div class="warn">${rep.reason === 'overlap' ? 'This notch overlaps another notch on the same edge.' : rep.reason === 'curve' ? 'Notches only fit on straight edges.' : `The notch is wider than its edge (${fmt(L)} ${units()}).`}</div>`
+      : '';
+    return `${head('notch', 'Notch', `${fmt(n.width)} × ${fmt(n.depth)} ${units()} · ${shape}`)}
+      ${warn}
+      <div class="card"><h4>Size</h4><div class="grid2">
+        <label class="fld"><span>Width</span>${numInput('id="notchW"', n.width)}</label>
+        <label class="fld"><span>Depth</span>${numInput('id="notchD"', n.depth)}</label></div>
+        <div class="chips"><button data-notch-depth="half">Half circle</button><button data-notch-depth="shallow">Shallow</button><button data-notch-depth="oblong">Oblong</button></div>
+        <p class="note">Depth half the width makes a half circle; less makes a shallow scoop; more makes an oblong U.</p></div>
+      <div class="card"><h4>Position</h4>
+        <label class="switch"><span>Centred on the edge</span><input type="checkbox" id="notchCentred" ${centred ? 'checked' : ''}></label>
+        ${centred ? '' : `<label class="fld" style="margin-top:8px"><span>Centre, from the ${ends[0]} end (edge is ${fmt(L)} ${units()})</span>${numInput('id="notchAt"', at)}</label>`}</div>
+      <div class="card"><h4>${icon('corner')} Round where it meets the edge</h4>${radiusControl(fil, 'notch', true)}
+        <p class="note">You can also round each side on its own with the Round corners tool.</p></div>
+      <p class="note">Holes and stitching follow the notch when its edge has them.</p>
+      <button class="small danger" id="delNotch">${icon('trash')} Delete notch</button>`;
+  }
+
   function renderShapeInspector() {
     const pc = piece();
-    const c = contour();
-    const b = contourBox(c);
-    const ids = allEdgeIds(c);
-    const modes = ids.map((s) => edgeProps(c, s).mode || 'none');
-    const roundIds = ids.filter((s) => roundable(c, s));
-    const fil = commonValue(roundIds.map((s) => Number(edgeProps(c, s).fillet) || 0));
-    const lay = Lay.layoutPiece(project, pc);
+    const sh = shapeById(selected('shape')[0]);
+    const c = sh;
+    const b = RS.rawBox(c);
+    const lay = curLay();
+    const rep = (lay.resolved.report.shapes || {})[sh.id];
+    const refs = shapeEdgeRefs(sh);
+    const modes = refs.map((r) => (edgeTarget(r) || {}).mode || 'none');
+    const no = shapeNo(sh.id);
     const targets = [`<option value="outline">the outline</option>`]
-      .concat(pc.cutouts.map((_, i) => (i === ui.contour.idx ? '' : `<option value="cutout:${i}">shape ${i + 1}</option>`)))
+      .concat(pc.cutouts.map((o, i) => (o.id === sh.id ? '' : `<option value="${o.id}">shape ${i + 1}</option>`)))
       .join('');
     const al = (k, label) => `<button data-align="${k}">${label}</button>`;
-    return `${head('shape', `Shape ${ui.contour.idx + 1}`, b ? `${fmt(b.maxX - b.minX)} × ${fmt(b.maxY - b.minY)} ${units()} · cut out of the piece` : '')}
+    const op = sh.op || 'hole';
+    const warn = rep && !rep.ok
+      ? `<div class="warn">${rep.reason === 'apart' ? 'This shape doesn’t touch the outline, so it can’t be merged.' : 'This shape doesn’t overlap the outline, so nothing changes.'}</div>`
+      : rep && rep.extra ? `<div class="warn">The result came apart into ${rep.extra + 1} parts; only the largest is kept.</div>` : '';
+    return `${head('shape', `Shape ${no}`, `${sizeText(c)} · ${OP_SUB[op]}`)}
+      <div class="card"><h4>Use it as</h4><div class="seg wide">${['hole', 'cut', 'merge', 'overlap']
+        .map((k) => `<button class="${op === k ? 'on' : ''}" data-op="${k}">${OP_LABEL[k]}</button>`)
+        .join('')}</div>
+        <p class="note">${op === 'hole' ? 'A hole inside the piece, like a card slot.' : 'It stays a shape you can move, resize or switch back. The piece updates as you go.'}</p>${warn}</div>
+      ${sizeCard(c, 'shape')}
       ${b ? `<div class="card"><h4>Position</h4><div class="grid2">
           <label class="fld"><span>Centre X</span>${numInput('id="posX"', (b.minX + b.maxX) / 2)}</label>
           <label class="fld"><span>Centre Y</span>${numInput('id="posY"', (b.minY + b.maxY) / 2)}</label></div>
@@ -1081,33 +1520,32 @@
         <div class="align-label">Centre on its edge</div>
         <div class="align-grid four">${al('onTop', 'Top')}${al('onBottom', 'Bottom')}${al('onLeft', 'Left')}${al('onRight', 'Right')}</div>
         <p class="note">Or drag the shape on the drawing.</p></div>` : ''}
-      <div class="card"><h4>Combine with the outline</h4>
-        <div class="combine-grid">
-          <button data-combine="cut" title="Remove this shape's area from the outline">Cut away</button>
-          <button data-combine="merge" title="Add this shape's area to the outline">Merge</button>
-          <button data-combine="overlap" title="Keep only where they overlap">Keep overlap</button>
-          <button id="chooseLines" title="Pick which lines to keep">Choose lines…</button>
-        </div>
-        <p class="note">Thumb notch: centre a circle on the top edge, then Cut away.</p></div>
-      <div class="card"><h4>${icon('edge')} Around this shape</h4>${modeSeg(commonValue(modes), 'data-allmode')}</div>
-      ${roundIds.length ? `<div class="card"><h4>${icon('corner')} Round all corners</h4>${radiusControl(fil, 'all')}</div>` : ''}
-      ${spacingCheck(lay.cutouts[ui.contour.idx])}
+      <div class="card"><h4>${icon('edge')} Around this shape</h4>${modeSeg(commonValue(modes), 'data-shapemode')}</div>
       ${advancedSection(c)}
-      <button class="small danger" id="delShape">${icon('trash')} Delete shape</button>`;
+      <div class="row"><button class="small" id="chooseLines" title="Pick exactly which lines to keep">Choose lines…</button>
+        <button class="small danger" id="delShape">${icon('trash')} Delete shape</button></div>`;
   }
 
   function renderDrawInspector() {
-    const c = contour();
-    return `${head('pen', isOutline() ? 'Drawing the outline' : 'Drawing a shape', `${c.segments.length} line${c.segments.length === 1 ? '' : 's'} so far`)}
+    const c = drawContour();
+    const isOut = ui.drawTarget === 'outline';
+    return `${head('pen', isOut ? 'Drawing the outline' : 'Drawing a shape', `${c.segments.length} line${c.segments.length === 1 ? '' : 's'} so far`)}
       <div class="tip">${icon('info')}<div>Click on the grid to place points. Click the first point (or press Enter) to close the shape. Hold Shift for straight 15° steps. You can fine-tune sizes afterwards.</div></div>
       <div class="row"><button class="primary" id="finishDraw">${icon('check')} Finish</button><button id="undoPoint" ${c.start ? '' : 'disabled'}>Remove last point</button></div>`;
+  }
+
+  function renderOriginInspector() {
+    return `${head('target', 'Origin point', 'Click a hole or a stitch line')}
+      <div class="tip">${icon('info')}<div>Click any hole, or anywhere on a stitch line. A hole stays put there and the others space out from it; on a stitch line a tick marks the spot on the print.</div></div>
+      <button class="ghost" data-tool-start="select">Cancel</button>`;
   }
 
   function renderCombineInspector() {
     const kept = ui.combine.pieces.filter((x) => x.keep).length;
     return `${head('shape', 'Choose lines', `${kept} of ${ui.combine.pieces.length} kept`)}
-      <div class="tip">${icon('info')}<div>The outline and shape ${ui.combine.idx + 1} are split wherever they cross. Click a line to keep it (solid) or remove it (dashed). The kept lines must join into one closed shape.</div></div>
-      <div class="card"><h4>Start from</h4><div class="seg wide">
+      <div class="tip">${icon('info')}<div>The outline and shape ${shapeNo(ui.combine.id)} are split wherever they cross. Click a line to keep it (solid) or remove it (dashed). The kept lines must join into one closed shape.</div></div>
+      <div class="warn">Applying makes the outline fixed: its notches and combined shapes become plain lines that can’t be edited as shapes any more.</div>
+      <div class="card" style="margin-top:12px"><h4>Start from</h4><div class="seg wide">
         <button data-preset="cut">Cut away</button><button data-preset="merge">Merge</button><button data-preset="overlap">Overlap</button></div></div>
       <div class="row"><button class="primary" id="applyLines">Apply</button><button class="ghost" id="cancelLines">Cancel</button></div>`;
   }
@@ -1117,9 +1555,12 @@
     let html;
     if (ui.tool === 'draw') html = renderDrawInspector();
     else if (ui.combine) html = renderCombineInspector();
+    else if (ui.tool === 'round') html = renderRoundInspector();
+    else if (ui.tool === 'origin') html = renderOriginInspector();
     else if (ui.sel.type === 'edge') html = renderEdgeInspector();
     else if (ui.sel.type === 'corner') html = renderCornerInspector();
-    else if (ui.sel.type === 'shape' && !isOutline()) html = renderShapeInspector();
+    else if (ui.sel.type === 'notch') html = renderNotchInspector();
+    else if (ui.sel.type === 'shape') html = renderShapeInspector();
     else html = renderPieceInspector();
     $('#rightPanel').innerHTML = html;
     const at = $('#alignTarget');
@@ -1133,67 +1574,133 @@
     if (det) det.addEventListener('toggle', () => (ui.advOpen = det.open));
   }
 
-  // Ids the radius control applies to.
+  // Corners a radius control applies to.
   function radiusTargets(scope) {
-    const c = contour();
-    return scope === 'sel' ? selectedCorners() : allEdgeIds(c);
+    if (scope === 'sel') return selected('corner');
+    if (scope === 'notch') {
+      const id = selected('notch')[0];
+      return id ? [`n:${id}:L`, `n:${id}:R`] : [];
+    }
+    return [];
+  }
+
+  // A radius picked: the brush takes it, other scopes apply it now.
+  function applyRadius(scope, r, live) {
+    if (scope === 'brush') {
+      ui.brush = r;
+      if (ui.tool !== 'round') {
+        ui.tool = 'round';
+        clearSel();
+      }
+      if (live) {
+        renderCanvas();
+        renderHint();
+      } else renderAll();
+      return;
+    }
+    setFillets(radiusTargets(scope), r);
+    if (live) {
+      layCache.key = null;
+      renderCanvas();
+    } else commit();
   }
 
   $('#rightPanel').addEventListener('input', (e) => {
     const t = e.target;
     if (t.dataset.radiusSlider) {
       // Live preview while dragging; the change event records it for undo.
-      setFillets(contour(), radiusTargets(t.dataset.radiusSlider), Number(t.value));
-      const box = $(`[data-radius-input="${t.dataset.radiusSlider}"]`);
+      const scope = t.dataset.radiusSlider;
+      const box = $(`[data-radius-input="${scope}"]`);
       if (box) box.value = fmt(Number(t.value));
-      renderCanvas();
+      if (scope === 'brush') {
+        ui.brush = Number(t.value);
+        renderHint();
+      } else applyRadius(scope, Number(t.value), true);
     }
   });
 
+  function bad(input) {
+    input.classList.add('bad');
+    toast('That value isn’t valid.');
+  }
+
+  // Keep notches pointing at the right edges when outline edges change.
+  function shiftNotches(fromIdx, delta, removedIdx) {
+    const pc = piece();
+    pc.notches = (pc.notches || []).filter((n) => n.edge !== removedIdx);
+    pc.notches.forEach((n) => {
+      if (n.edge >= fromIdx) n.edge += delta;
+    });
+  }
+
   $('#rightPanel').addEventListener('change', (e) => {
     const t = e.target;
-    const c = contour();
     const pc = piece();
-    if (t.dataset.radiusSlider) {
-      setFillets(c, radiusTargets(t.dataset.radiusSlider), Number(t.value));
-      return commit();
+    if (t.dataset.radiusSlider) return applyRadius(t.dataset.radiusSlider, Number(t.value), false);
+    if (t.dataset.radiusInput) {
+      const v = M.parseLength(t.value, units());
+      if (!Number.isFinite(v) || v < 0) return bad(t);
+      return applyRadius(t.dataset.radiusInput, v, false);
     }
-    if (t.dataset.radiusInput) return parseInto(t, (v) => setFillets(c, radiusTargets(t.dataset.radiusInput), v));
     if (t.id === 'pieceName') {
       pc.name = t.value.trim() || pc.name;
       return commit();
     }
     if (t.id === 'allCorners') {
-      allEdgeIds(c).forEach((s) => (edgeProps(c, s).corner = t.checked));
+      cornersOf(curLay().outline).forEach((cn) => {
+        const tg = cornerTarget(cn.vref);
+        if (tg) tg.corner = t.checked;
+      });
       return commit();
     }
     if (t.id === 'selCorner') {
-      selectedCorners().forEach((s) => (edgeProps(c, s).corner = t.checked));
+      selected('corner').forEach((v) => {
+        const tg = cornerTarget(v);
+        if (tg) tg.corner = t.checked;
+      });
       return commit();
     }
-    if (t.dataset.set === 'p_') return parseInto(t, (v) => (pc.settings[t.dataset.key] = v));
-    if (t.id === 'customSettings') {
-      if (t.checked && !Object.keys(pc.settings).length) pc.settings = { ...project.defaults };
-      pc.customSettings = t.checked;
+    if (t.dataset.size) {
+      const v = M.parseLength(t.value, units());
+      if (!Number.isFinite(v) || v <= 0) return bad(t);
+      const dim = t.dataset.dim;
+      const w = dim === 'w' || dim === 'd' ? v : NaN;
+      const h = dim === 'h' || dim === 'd' ? v : NaN;
+      if (t.dataset.size === 'piece') {
+        RS.resizePiece(pc, w, h);
+        ui.view = null; // refit so the new size is in view
+      }
+      else {
+        const sh = shapeById(selected('shape')[0]);
+        if (sh) RS.resizeShape(sh, w, h);
+      }
       return commit();
     }
-    if (t.id === 'zeroOn') {
-      pc.zero.enabled = t.checked;
-      return commit();
+    // Notch fields
+    const n = ui.sel.type === 'notch' ? notchById(ui.sel.items[0]) : null;
+    if (n) {
+      if (t.id === 'notchW' || t.id === 'notchD') {
+        const v = M.parseLength(t.value, units());
+        if (!Number.isFinite(v) || v <= 0) return bad(t);
+        if (t.id === 'notchW') n.width = v;
+        else n.depth = v;
+        return commit();
+      }
+      if (t.id === 'notchCentred') {
+        const rep = curLay().resolved.report.notches[n.id] || {};
+        n.at = t.checked ? null : round(rep.at !== undefined ? rep.at : 0);
+        return commit();
+      }
+      if (t.id === 'notchAt') return parseInto(t, (v) => (n.at = v));
     }
-    if (t.id === 'zeroEdge') {
-      pc.zero.edge = Number(t.value);
-      pc.zero.offset = 0;
-      return commit();
-    }
-    if (t.id === 'zeroOffset') return parseInto(t, (v) => (pc.zero.offset = v));
     if (t.id === 'alignTarget') {
       ui.alignTarget = t.value;
       return undefined;
     }
+    const c = advContour();
     if (t.id === 'posX' || t.id === 'posY') {
       const v = M.parseLength(t.value, units());
-      const b = contourBox(c);
+      const b = RS.rawBox(c);
       if (!Number.isFinite(v) || !b) return bad(t);
       if (t.id === 'posX') moveContour(c, v - (b.minX + b.maxX) / 2, 0);
       else moveContour(c, 0, v - (b.minY + b.maxY) / 2);
@@ -1206,51 +1713,57 @@
       c.start[t.id === 'startX' ? 'x' : 'y'] = v;
       return commit();
     }
-    if (t.dataset.seg !== undefined) {
-      const s = c.segments[Number(t.dataset.seg)];
+    let seg = null;
+    if (t.dataset.eseg) {
+      const r = parseRef(t.dataset.eseg);
+      const owner = r.kind === 'o' ? pc.outline : shapeById(r.id);
+      seg = owner && owner.segments[r.idx];
+    } else if (t.dataset.seg !== undefined) seg = c.segments[Number(t.dataset.seg)];
+    if (seg) {
       const key = t.dataset.key;
       if (key === 'type') {
-        if (t.value === 'arc') Object.assign(s, { type: 'arc', radius: s.radius || (s.length ? s.length / 2 : 20), sweep: s.sweep || 90 });
-        else Object.assign(s, { type: 'line', length: s.length || (s.radius ? s.radius * G.rad(Math.abs(s.sweep || 90)) : 20) });
+        if (t.value === 'arc') Object.assign(seg, { type: 'arc', radius: seg.radius || (seg.length ? seg.length / 2 : 20), sweep: seg.sweep || 90 });
+        else Object.assign(seg, { type: 'line', length: seg.length || (seg.radius ? seg.radius * G.rad(Math.abs(seg.sweep || 90)) : 20) });
         return commit();
       }
       if (key === 'length' || key === 'radius') {
         const v = M.parseLength(t.value, units());
         if (!Number.isFinite(v) || v <= 0) return bad(t);
-        s[key] = v;
+        seg[key] = v;
       } else {
         const v = M.parseNumber(t.value);
         if (!Number.isFinite(v) || (key === 'sweep' && (v === 0 || Math.abs(v) > 360))) return bad(t);
-        s[key] = v;
+        seg[key] = v;
       }
       return commit();
     }
     return undefined;
   });
 
-  function bad(input) {
-    input.classList.add('bad');
-    toast('That value isn’t valid.');
-  }
-
   $('#rightPanel').addEventListener('click', (e) => {
     const t = e.target.closest('button');
     if (!t) return undefined;
-    const c = contour();
+    const pc = piece();
     if (t.dataset.setmode) {
-      setModes(c, selectedEdges(), t.dataset.setmode);
+      setModes(selected('edge'), t.dataset.setmode);
       return commit();
     }
     if (t.dataset.allmode) {
-      setModes(c, allEdgeIds(c), t.dataset.allmode);
+      setModes(outlineEdgeRefs(), t.dataset.allmode);
       return commit();
     }
-    if (t.dataset.radius !== undefined) {
-      setFillets(c, radiusTargets(t.dataset.scope), Number(t.dataset.radius));
+    if (t.dataset.shapemode) {
+      const sh = shapeById(selected('shape')[0]);
+      if (sh) setModes(shapeEdgeRefs(sh), t.dataset.shapemode);
       return commit();
     }
-    if (t.dataset.selall) {
-      ui.sel = { type: t.dataset.selall, items: allEdgeIds(c) };
+    if (t.dataset.radius !== undefined) return applyRadius(t.dataset.scope, Number(t.dataset.radius), false);
+    if (t.dataset.selall === 'edge') {
+      ui.sel = { type: 'edge', items: outlineEdgeRefs() };
+      return renderAll();
+    }
+    if (t.dataset.selall === 'corner') {
+      ui.sel = { type: 'corner', items: cornersOf(curLay().outline).map((c) => c.vref) };
       return renderAll();
     }
     if (t.dataset.deselect) {
@@ -1258,20 +1771,32 @@
       return renderAll();
     }
     if (t.dataset.toolStart) {
-      if (t.dataset.toolStart === 'draw') startDraw('outline');
-      else {
-        ui.tool = t.dataset.toolStart;
-        renderAll();
-      }
-      return undefined;
+      if (t.dataset.toolStart === 'draw-outline') return startDraw('outline');
+      return setTool(t.dataset.toolStart);
+    }
+    if (t.dataset.op) {
+      const sh = shapeById(selected('shape')[0]);
+      if (!sh) return undefined;
+      sh.op = t.dataset.op;
+      return commit();
+    }
+    if (t.dataset.notchDepth) {
+      const n = notchById(selected('notch')[0]);
+      if (!n) return undefined;
+      n.depth = round({ half: n.width / 2, shallow: n.width / 5, oblong: n.width }[t.dataset.notchDepth]);
+      return commit();
     }
     if (t.dataset.delSeg !== undefined) {
-      c.segments.splice(Number(t.dataset.delSeg), 1);
-      ui.sel = { type: null, items: [] };
+      const c = advContour();
+      const i = Number(t.dataset.delSeg);
+      c.segments.splice(i, 1);
+      if (c === pc.outline) {
+        shiftNotches(i + 1, -1, i);
+      }
+      ui.sel = ui.sel.type === 'shape' ? ui.sel : { type: null, items: [] };
       return commit();
     }
     if (t.dataset.align) return alignShape(t.dataset.align);
-    if (t.dataset.combine) return applyCombine(ui.contour.idx, t.dataset.combine);
     if (t.dataset.preset && ui.combine) {
       LT.boolean.preset(ui.combine.pieces, t.dataset.preset);
       return renderAll();
@@ -1279,34 +1804,51 @@
     switch (t.id) {
       case 'addLine':
       case 'addArc': {
+        const c = advContour();
         if (!c.start) c.start = { x: 0, y: 0 };
         const angle = round(G.endHeading(c));
-        const mode = isOutline() ? 'holes' : 'none';
+        const mode = c === pc.outline ? 'holes' : 'none';
+        // A notch on the old closing edge stays on the closing edge.
+        if (c === pc.outline) (pc.notches || []).forEach((n) => {
+          if (n.edge === c.segments.length) n.edge += 1;
+        });
         c.segments.push(t.id === 'addLine'
           ? M.seg('line', { length: inch() ? 25.4 : 20, angle, mode })
           : M.seg('arc', { radius: inch() ? 12.7 : 15, sweep: 90, angle, mode }));
         return commit();
       }
       case 'redraw':
-        return startDraw('current');
+        return startDraw(advContour() === pc.outline ? 'outline' : advContour().id);
       case 'delShape':
-        piece().cutouts.splice(ui.contour.idx, 1);
-        clearSel();
-        commit();
-        return toast('Shape deleted. Undo brings it back.');
+      case 'delNotch':
+        return deleteSelected();
+      case 'addNotch': {
+        const r = parseRef(selected('edge')[0]);
+        const e = G.buildEdges(pc.outline).find((x) => x.edge === r.idx);
+        if (!e) return undefined;
+        const L = G.primLength(e);
+        const w = round(Math.min(inch() ? 19.05 : 20, L * 0.6));
+        const n = M.newNotch(r.idx, w, round(w / 2));
+        pc.notches = pc.notches || [];
+        pc.notches.push(n);
+        ui.sel = { type: 'notch', items: [n.id] };
+        return commit();
+      }
       case 'chooseLines':
-        return startChooseLines(ui.contour.idx);
+        return startChooseLines(selected('shape')[0]);
       case 'applyLines':
-        return ui.combine && applyCombine(ui.combine.idx, null, ui.combine.pieces);
+        return ui.combine && applyChooseLines();
       case 'cancelLines':
         ui.combine = null;
         return renderAll();
       case 'finishDraw':
         return finishDraw();
-      case 'undoPoint':
+      case 'undoPoint': {
+        const c = drawContour();
         if (c.segments.length) c.segments.pop();
         else c.start = null;
         return commit();
+      }
       default:
         return undefined;
     }
@@ -1317,10 +1859,11 @@
 
   function alignShape(how) {
     const pc = piece();
-    const c = contour();
-    const target = ui.alignTarget.startsWith('cutout:') ? pc.cutouts[Number(ui.alignTarget.split(':')[1])] : pc.outline;
-    const S0 = contourBox(c);
-    const T = target && contourBox(target);
+    const c = shapeById(selected('shape')[0]);
+    if (!c) return;
+    const target = ui.alignTarget !== 'outline' ? shapeById(ui.alignTarget) : pc.outline;
+    const S0 = RS.rawBox(c);
+    const T = target && RS.rawBox(target);
     if (!S0 || !T) return;
     const scx = (S0.minX + S0.maxX) / 2;
     const scy = (S0.minY + S0.maxY) / 2;
@@ -1341,53 +1884,47 @@
     commit();
   }
 
-  // Keep the zero point at the same spot when the outline's edges change.
-  function relocateZero(pc, oldOutline) {
-    if (!pc.zero.enabled) return;
-    const pt = G.pointOnEdge(oldOutline, pc.zero.edge, pc.zero.offset);
-    if (!pt) return;
-    let best = null;
-    G.buildEdges(pc.outline).forEach((e) => {
-      const s = G.projectOnPrim(e, pt);
-      const d = G.dist(G.primPointAt(e, s), pt);
-      if (!best || d < best.d) best = { d, edge: e.edge, offset: s };
-    });
-    if (best) pc.zero = { ...pc.zero, edge: best.edge, offset: round(best.offset) };
+  // The outline as it is without shape `id`, for choosing lines.
+  function outlineWithout(id) {
+    const pc = piece();
+    const tmp = { ...pc, cutouts: pc.cutouts.filter((c) => c.id !== id) };
+    return RS.resolvePiece(tmp).outline;
   }
 
-  function applyCombine(idx, op, pieces) {
+  function startChooseLines(id) {
+    const sh = shapeById(id);
+    const base = outlineWithout(id);
+    if (!sh || !base) return;
+    const A = G.buildPrimitives(base);
+    const B = G.buildPrimitives(sh);
+    ui.combine = { id, pieces: LT.boolean.preset(LT.boolean.splitShapes(A, B), sh.op && sh.op !== 'hole' ? sh.op : 'cut') };
+    ui.tool = 'select';
+    renderAll();
+  }
+
+  // Choosing lines by hand can't stay live, so it fixes the outline.
+  function applyChooseLines() {
     const pc = piece();
-    const res = LT.boolean.combine(pc.outline, pc.cutouts[idx], op, pieces);
+    const id = ui.combine.id;
+    const base = outlineWithout(id);
+    const res = LT.boolean.combine(base, shapeById(id), null, ui.combine.pieces);
     if (!res.outline) {
-      toast(pieces ? 'The kept lines don’t join into a closed shape.' : 'Those shapes don’t overlap, so there’s nothing to keep.');
-      return false;
+      toast('The kept lines don’t join into a closed shape.');
+      return;
     }
-    if (op === 'merge' && res.extra) {
-      toast('The shape doesn’t touch the outline, so it can’t be merged.');
-      return false;
-    }
-    const old = pc.outline;
+    const origin = pc.outline.origin;
     pc.outline = res.outline;
-    pc.cutouts.splice(idx, 1);
-    pc.cutouts.push(...res.holes);
-    relocateZero(pc, old);
+    if (origin) pc.outline.origin = origin;
+    pc.notches = [];
+    pc.cutouts = pc.cutouts.filter((c) => c.id !== id && !isLiveOp(c));
+    res.holes.forEach((h) => pc.cutouts.push(M.newShape(h)));
     clearSel();
     ui.combine = null;
     commit();
     const notes = [];
     if (res.extra) notes.push(`The result came apart into ${res.extra + 1} parts; the largest was kept.`);
     if (res.open) notes.push('Some kept lines didn’t connect and were left out.');
-    toast(notes.length ? notes.join(' ') : 'Combined. Undo if it isn’t what you wanted.');
-    return true;
-  }
-
-  function startChooseLines(idx) {
-    const pc = piece();
-    const A = G.buildPrimitives(pc.outline);
-    const B = G.buildPrimitives(pc.cutouts[idx]);
-    ui.combine = { idx, pieces: LT.boolean.preset(LT.boolean.splitShapes(A, B), 'cut') };
-    ui.tool = 'select';
-    renderAll();
+    toast(notes.length ? notes.join(' ') : 'Done. Undo if it isn’t what you wanted.');
   }
 
   // ---------------------------------------------------------------------
@@ -1619,7 +2156,7 @@
       if (e.key === 'Enter' || e.key === 'Escape') finishDraw();
       if (e.key === 'Backspace') {
         e.preventDefault();
-        const c = contour();
+        const c = drawContour();
         if (c.segments.length) c.segments.pop();
         else c.start = null;
         commit();
@@ -1634,17 +2171,13 @@
       return;
     }
     const k = e.key.toLowerCase();
-    if (k === 'v') {
-      ui.tool = 'select';
-      renderAll();
-    } else if (k === 'p') {
-      startDraw();
-    } else if ((k === 'delete' || k === 'backspace') && ui.sel.type === 'shape') {
-      piece().cutouts.splice(ui.contour.idx, 1);
-      clearSel();
-      commit();
-    } else if (ui.sel.type === 'edge' && (k === 'h' || k === 's' || k === 'n')) {
-      setModes(contour(), selectedEdges(), { h: 'holes', s: 'stitch', n: 'none' }[k]);
+    if (k === 'v') setTool('select');
+    else if (k === 'p') startDraw();
+    else if (k === 'r') setTool('round');
+    else if (k === 'o') setTool('origin');
+    else if ((k === 'delete' || k === 'backspace') && (ui.sel.type === 'shape' || ui.sel.type === 'notch')) deleteSelected();
+    else if (ui.sel.type === 'edge' && (k === 'h' || k === 's' || k === 'n')) {
+      setModes(selected('edge'), { h: 'holes', s: 'stitch', n: 'none' }[k]);
       commit();
     }
   });
