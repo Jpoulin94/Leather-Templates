@@ -1170,3 +1170,41 @@ button.run.on {
     width: 140px;
   }
 }
+
+/* Cut lines, trim and alignment guides */
+#canvas.tool-line,
+#canvas.tool-trim {
+  cursor: crosshair;
+}
+#canvas .part {
+  cursor: pointer;
+  transition: fill 0.08s;
+}
+#canvas .part:hover {
+  fill: color-mix(in srgb, var(--danger) 28%, transparent);
+}
+.multi-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+.multi-list span {
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--panel-2);
+  border: 1px solid var(--line, #e5ded6);
+}
+.multi-list span.anchor {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.align-grid.two {
+  grid-template-columns: repeat(2, 1fr);
+  margin-bottom: 5px;
+}
+.align-grid.two button {
+  font-weight: 600;
+  padding: 9px 4px;
+}

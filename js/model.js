@@ -56,7 +56,42 @@
       outline: outline || rectangle(100, 60, 0, 0, 0, 'holes'),
       notches: [],
       cutouts: [],
+      lines: [],
     };
+  }
+
+  // A cut line across the outline (target 'outline') or a shape (its id).
+  function newLine(a, b, target = 'outline') {
+    return { id: uid(), target, a, b, remove: null, mode: 'none', corners: { a: { fillet: 0, corner: true }, b: { fillet: 0, corner: true } } };
+  }
+
+  // Rounded slot (a rectangle with round ends) centred on (cx, cy); the
+  // ends are on the short sides.
+  function slot(w, h, cx = 0, cy = 0, mode = 'none') {
+    const c = newContour();
+    if (h >= w) {
+      const r = w / 2;
+      const L = h - w;
+      c.start = { x: cx + r, y: cy - L / 2 };
+      c.segments = [
+        seg('line', { length: L, angle: 90, mode }),
+        seg('arc', { radius: r, sweep: 180, angle: 90, mode }),
+        seg('line', { length: L, angle: 270, mode }),
+        seg('arc', { radius: r, sweep: 180, angle: 270, mode }),
+      ];
+    } else {
+      const r = h / 2;
+      const L = w - h;
+      c.start = { x: cx - L / 2, y: cy - r };
+      c.segments = [
+        seg('line', { length: L, angle: 0, mode }),
+        seg('arc', { radius: r, sweep: 180, angle: 0, mode }),
+        seg('line', { length: L, angle: 180, mode }),
+        seg('arc', { radius: r, sweep: 180, angle: 180, mode }),
+      ];
+    }
+    if (Math.abs(w - h) < 1e-9) return circle(w / 2, cx, cy, mode);
+    return c;
   }
 
   function newShape(contour, op = 'hole') {
@@ -103,6 +138,7 @@
         outline,
         notches: (pc.notches || []).map((n) => ({ ...newNotch(0, 20, 10), ...n, corners: { L: { fillet: 0, corner: true }, R: { fillet: 0, corner: true }, ...(n.corners || {}) } })),
         cutouts: (pc.cutouts || []).map((c) => ({ id: uid(), op: 'hole', joins: {}, ...fixContour(c) })),
+        lines: (pc.lines || []).filter((l) => l && l.a && l.b).map((l) => ({ ...newLine(l.a, l.b), ...l, corners: { a: { fillet: 0, corner: true }, b: { fillet: 0, corner: true }, ...(l.corners || {}) } })),
       };
       // Stitching sizes are set once per project now.
       delete out.zero;
@@ -172,6 +208,8 @@
     newPiece,
     newShape,
     newNotch,
+    newLine,
+    slot,
     newProject,
     normalizeProject,
     toUnits,
