@@ -1161,7 +1161,9 @@
       const own = kind === 'cutout' && lc.src ? lc.src : null;
       if (kind === 'cutout' && !combining) {
         const on = own && selShape.has(own);
-        out.push(`<path class="${own && !drawing ? 'grab' : ''}" d="${R.pathData(lc.prims, flip, true)}" fill="${on ? 'color-mix(in srgb, var(--accent) 14%, var(--canvas))' : 'var(--canvas)'}" stroke="none" ${own ? `data-shape="${own}"` : ''}/>`);
+        // A hole left by a shape that cuts away or merges has no shape of its
+        // own: let clicks through to that shape's grab area underneath.
+        out.push(`<path class="${own && !drawing ? 'grab' : ''}" d="${R.pathData(lc.prims, flip, true)}" fill="${on ? 'color-mix(in srgb, var(--accent) 14%, var(--canvas))' : 'var(--canvas)'}" stroke="none" ${own ? `data-shape="${own}"` : 'pointer-events="none"'}/>`);
       }
       // Selection glow under selected edges and notches
       lc.prims.forEach((p) => {
