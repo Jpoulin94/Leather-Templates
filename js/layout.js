@@ -64,6 +64,11 @@
   // remain (`uneven`).
   function fit(A, B, spacing) {
     const length = B.s - A.s;
+    // A collapsed or runaway hole line (from an extreme setting) gets no
+    // holes rather than an endless list.
+    if (!Number.isFinite(length) || length < 0 || length / spacing > 1e5) {
+      return { pos: [], length: 0, actual: spacing, gap: 0, uneven: false, dropped: false, oddS: B.s, oddEnd: 'to', oddKind: B.kind, oddVertex: null };
+    }
     const back = B.kind === 'origin' && A.kind !== 'origin';
     const n = Math.floor((length + TOL) / spacing);
     let rem = length - n * spacing;

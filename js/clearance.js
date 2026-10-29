@@ -223,12 +223,18 @@
     return sectionIn(LT.layout.layoutPiece(project, pc), u);
   }
 
+  const MIN_DISTANCE = 0.5; // mm: the least holes-from-edge offered
+
   // Secant steps to make the section `target` long.
   function solveFix(project, piece, u, kind, start, target) {
     let x0 = start;
     let f0 = u.length;
     let x1 = kind === 'distance' ? start - (target - u.length) / 2 : start + (target - u.length);
+    // A distance only gets shorter (down to MIN_DISTANCE); a move stays
+    // within a sensible reach. Outside that, there's no fix.
+    const ok = (x) => Number.isFinite(x) && (kind === 'distance' ? x >= MIN_DISTANCE - 1e-6 && x <= start + 1e-6 : Math.abs(x - start) <= 1000);
     for (let it = 0; it < 8; it++) {
+      if (!ok(x1)) return null;
       const r = sectionAfter(project, piece, u, kind, x1);
       if (!r) return null;
       if (Math.abs(r.length - target) < 0.002) return r.even ? x1 : null;
@@ -242,7 +248,6 @@
   }
 
   const r2 = (v) => Math.round(v * 100) / 100;
-  const MIN_DISTANCE = 0.5; // mm: the least holes-from-edge offered
 
   // Shorter holes-from-edge values (for every edge of the project) that
   // even out side `u`, nearest first, stopping at the first that evens out
@@ -254,6 +259,9 @@
     const out = [];
     for (let k = 1; k <= 40; k++) {
       const target = Math.floor(u.length / s + 1e-9) * s + k * s;
+      // A side grows by about twice the change in distance: past this, even
+      // the least distance can't make it this long.
+      if (cur - (target - u.length) / 2 < MIN_DISTANCE - 2 * s) break;
       const e = solveFix(project, piece, u, 'distance', cur, target);
       if (e === null) continue;
       if (e < MIN_DISTANCE) break;
