@@ -166,7 +166,15 @@
   let clashCache = { key: null, list: [] };
   function clashes() {
     const lay = curLay();
-    if (clashCache.key !== layCache.key) clashCache = { key: layCache.key, list: LT.clearance.check(project, piece(), lay) };
+    if (clashCache.key !== layCache.key) {
+      let list = [];
+      try {
+        list = LT.clearance.check(project, piece(), lay);
+      } catch (err) {
+        console.error(err);
+      }
+      clashCache = { key: layCache.key, list };
+    }
     return clashCache.list;
   }
 
@@ -174,7 +182,16 @@
   let unevenCache = { key: null, list: [] };
   function unevenSides() {
     const lay = curLay();
-    if (unevenCache.key !== layCache.key) unevenCache = { key: layCache.key, list: LT.clearance.uneven(project, piece(), lay) };
+    if (unevenCache.key !== layCache.key) {
+      let list = [];
+      try {
+        list = LT.clearance.uneven(project, piece(), lay);
+      } catch (err) {
+        // Never let working out the fixes stop the app from drawing.
+        console.error(err);
+      }
+      unevenCache = { key: layCache.key, list };
+    }
     return unevenCache.list;
   }
 

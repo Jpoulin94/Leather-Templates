@@ -145,3 +145,35 @@ test('assemble: a piece lines up on the origin name it shares with one below', (
   const backPocket = asm.items[0].origins.find((o) => o.name === 'Pocket').pt;
   assert.ok(G.dist(it.origin, backPocket) < 1e-6);
 });
+
+test('a piece whose distance fix would run away still lays out (Money Clip Wood)', () => {
+  const pr = model.normalizeProject({
+    name: 'Money Clip Wood',
+    defaults: { holeDiameter: 1.3, spacing: 4, edgeDistance: 2, stitchOffset: 4 },
+    pieces: [
+      {
+        name: 'Piece 1',
+        outline: {
+          start: { x: 0, y: 4.7 },
+          segments: [
+            { type: 'line', mode: 'holes', length: 169.3, angle: 0 },
+            { type: 'line', mode: 'holes', length: 65.3, angle: 90 },
+            { type: 'line', mode: 'holes', length: 169.3, angle: 180 },
+            { type: 'line', mode: 'holes', length: 80, angle: 270 },
+          ],
+          closing: { mode: 'holes' },
+        },
+        paths: [
+          { points: [{ x: 6.65, y: 67.35 }, { x: 6.65, y: 7.35 }] },
+          { points: [{ x: 70.65, y: 67.35 }, { x: 70.65, y: 7.35 }] },
+          { points: [{ x: 6.65, y: 11.35 }, { x: 70.65, y: 11.35 }] },
+          { points: [{ x: 6.65, y: 63.35 }, { x: 70.65, y: 63.35 }] },
+        ],
+      },
+    ],
+  });
+  const pc = pr.pieces[0];
+  const list = clearance.uneven(pr, pc);
+  assert.ok(list.length > 0);
+  list.forEach((u) => u.fix.distance.forEach((f) => assert.ok(f.amount >= 0.5 && f.amount < 2)));
+});
