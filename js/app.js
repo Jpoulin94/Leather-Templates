@@ -51,6 +51,7 @@
     x: '<path d="M6 6l12 12M18 6L6 18"/>',
     line: '<path d="M5 19L19 5"/><circle cx="5" cy="19" r="1.8"/><circle cx="19" cy="5" r="1.8"/>',
     stitchpath: '<path d="M4 18L10 8l6 6 4-8" stroke-dasharray="2 2.6"/><circle cx="4" cy="18" r="1.6"/><circle cx="10" cy="8" r="1.6"/><circle cx="16" cy="14" r="1.6"/><circle cx="20" cy="6" r="1.6"/>',
+    erase: '<circle cx="12" cy="12" r="6"/><path d="M5 5l14 14"/>',
     scissors: '<circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M20 4L8.1 15.9M14.5 14.5L20 20M8.1 8.1L12 12"/>',
     slot: '<rect x="8" y="3" width="8" height="18" rx="4"/>',
     align: '<path d="M12 3v18"/><rect x="5" y="6" width="14" height="4" rx="1"/><rect x="7" y="14" width="10" height="4" rx="1"/>',
@@ -1107,6 +1108,26 @@
     return pts.map((p, i) => `${i ? 'L' : 'M'}${num(p.x)} ${num(-p.y)}`).join('');
   }
 
+  // Holes taken out by hand: a faint dashed ring where each one was.
+  function skippedSvg(lay, lc) {
+    return (lc.skipped || []).map(
+      (h) =>
+        `<circle cx="${num(h.pt.x)}" cy="${num(-h.pt.y)}" r="${num(lay.holeRadius)}" fill="none" stroke="var(--muted)" stroke-width="1.1" stroke-dasharray="2 2" vector-effect="non-scaling-stroke" pointer-events="none"><title>Hole taken out</title></circle>`
+    );
+  }
+
+  // Take a hole out (or put it back). The rest keep their exact spacing.
+  function toggleHole(key, pt, back) {
+    const pc = piece();
+    const at = Lay.anchorOf(pc, key);
+    if (!at) return;
+    const rel = { x: round(pt.x - at.x), y: round(pt.y - at.y) };
+    const tol = Math.min(0.5, project.defaults.spacing / 4);
+    pc.removedHoles = (pc.removedHoles || []).filter((r) => !(r.on === key && Math.hypot(r.x - rel.x, r.y - rel.y) < tol));
+    if (!back) pc.removedHoles.push({ on: key, ...rel });
+    commit();
+  }
+
   function renderCanvas() {
     const w = svg.clientWidth;
     const h = svg.clientHeight;
@@ -1185,6 +1206,7 @@
       lc.holes.forEach((hp) => {
         out.push(`<circle cx="${num(hp.x)}" cy="${num(-hp.y)}" r="${num(lay.holeRadius)}" fill="color-mix(in srgb, var(--edge-holes) 16%, var(--canvas))" stroke="var(--edge-holes)" stroke-width="1.2" vector-effect="non-scaling-stroke"/>`);
       });
+      out.push(...skippedSvg(lay, lc));
       (lc.removed || []).forEach((h) => {
         out.push(`<circle cx="${num(h.pt.x)}" cy="${num(-h.pt.y)}" r="${num(lay.holeRadius)}" fill="none" stroke="var(--danger)" stroke-width="1.2" stroke-dasharray="2 2" vector-effect="non-scaling-stroke" pointer-events="none"><title>Corner hole left out to keep the spacing exact</title></circle>`);
       });
@@ -1196,6 +1218,16 @@
         });
       }
     });
+
+    // Remove holes: every hole (and every hole taken out) is clickable.
+    if (ui.tool === 'erase' && !combining) {
+      Lay.allOf(lay).forEach((lc) => {
+        const key = Lay.holeKey(lay, lc);
+        const r = Math.max(lay.holeRadius, 6 / ui.view.scale);
+        lc.holes.forEach((h) => out.push(`<circle class="hit" cx="${num(h.x)}" cy="${num(-h.y)}" r="${num(r)}" fill="transparent" data-hole="${esc(key)}" data-x="${h.x}" data-y="${h.y}"><title>Remove this hole</title></circle>`));
+        lc.skipped.forEach((h) => out.push(`<circle class="hit" cx="${num(h.pt.x)}" cy="${num(-h.pt.y)}" r="${num(r)}" fill="transparent" data-unhole="${esc(key)}" data-x="${h.pt.x}" data-y="${h.pt.y}"><title>Put this hole back</title></circle>`));
+      });
+    }
 
     // Cut lines that haven't cut anything yet, and the parts to pick from.
     if (!combining) {
@@ -1236,6 +1268,7 @@
         out.push(`<path d="${d}" fill="none" stroke="var(--edge-${lc.prims.some((p) => p.mode === 'stitch') ? 'stitch' : 'holes'})" stroke-width="1" stroke-opacity="0.45" stroke-dasharray="1 3" vector-effect="non-scaling-stroke" pointer-events="none"/>`);
         lc.stitch.forEach((st) => out.push(`<path d="${R.pathData(st.prims, flip, st.closed)}" fill="none" stroke="var(--edge-stitch)" stroke-width="1.4" stroke-dasharray="5 3" vector-effect="non-scaling-stroke" pointer-events="none"/>`));
         lc.holes.forEach((hp) => out.push(`<circle cx="${num(hp.x)}" cy="${num(-hp.y)}" r="${num(lay.holeRadius)}" fill="color-mix(in srgb, var(--edge-holes) 16%, var(--canvas))" stroke="var(--edge-holes)" stroke-width="1.2" vector-effect="non-scaling-stroke" pointer-events="none"/>`));
+        out.push(...skippedSvg(lay, lc));
         (lc.removed || []).forEach((h) => {
           out.push(`<circle cx="${num(h.pt.x)}" cy="${num(-h.pt.y)}" r="${num(lay.holeRadius)}" fill="none" stroke="var(--danger)" stroke-width="1.2" stroke-dasharray="2 2" vector-effect="non-scaling-stroke" pointer-events="none"><title>Corner hole left out to keep the spacing exact</title></circle>`);
         });
@@ -1404,6 +1437,8 @@
         : ui.lineStart
           ? 'Click the second point · it stretches to the edges · Shift for 15° steps'
           : 'Click the first point of the line · it snaps to corners and edges';
+    } else if (ui.tool === 'erase') {
+      msg = 'Click a hole to take it out · click a dashed ring to put it back · the other holes keep their spacing · Esc when done';
     } else if (ui.tool === 'origin') {
       msg = 'Click a hole or a stitch line to add an origin point there · Esc to cancel';
     } else if (ui.tool === 'path') {
@@ -1631,6 +1666,12 @@
     }
     if (ui.tool === 'origin') {
       placeOrigin(world);
+      return;
+    }
+    if (ui.tool === 'erase') {
+      const h = target && target.closest ? target.closest('[data-hole],[data-unhole]') : null;
+      if (h) toggleHole(h.dataset.hole || h.dataset.unhole, { x: Number(h.dataset.x), y: Number(h.dataset.y) }, !h.dataset.hole);
+      else toast('Click a hole to take it out, or a dashed ring to put it back.');
       return;
     }
     const el = target && target.closest ? target.closest('[data-ref],[data-vref],[data-shape],[data-line],[data-path]') : null;
@@ -1915,6 +1956,7 @@
       '<hr>',
       btn('data-tool="round"', 'corner', 'Round corners (R)', ui.tool === 'round'),
       btn('data-tool="origin"', 'target', 'Place origin point (O)', ui.tool === 'origin'),
+      btn('data-tool="erase"', 'erase', 'Remove holes (E)', ui.tool === 'erase'),
       btn('data-snap="1"', 'magnet', ui.snap ? 'Snap to grid: on' : 'Snap to grid: off', ui.snap),
     ].join('');
     $('#zoom').innerHTML = `
@@ -2003,6 +2045,7 @@
     const pc = piece();
     const all = Lay.allOf(lay);
     const holes = all.reduce((n, c) => n + c.holes.length, 0);
+    const skipped = all.reduce((n, c) => n + (c.skipped || []).length, 0);
     const ul = unevenSides();
     const ors = M.pieceOrigins(pc);
     const summary = [`${fmt(d.holeDiameter)} ${units()} holes`, `${fmt(d.spacing)} ${units()} apart`, holes ? `${holes} holes` : null, ors.length ? `${ors.length} origin${ors.length === 1 ? '' : 's'}` : null]
@@ -2070,6 +2113,10 @@
         ${check}
         ${unevenHtml}
         ${clashHtml}
+        <div class="sub-h">Remove holes</div>
+        <button class="small ${ui.tool === 'erase' ? 'primary' : ''}" data-tool-start="erase">${icon('erase')} ${ui.tool === 'erase' ? 'Click holes to take them out…' : 'Take out holes'}</button>
+        ${skipped ? `<button class="small" data-holes-back="1">Put all ${skipped} back</button>` : ''}
+        <p class="note">${skipped ? `${skipped} hole${skipped === 1 ? '' : 's'} taken out (dashed rings). ` : ''}The other holes stay exactly where they are.</p>
         <div class="sub-h">Origin point</div>
         ${originRows}
         <button class="small ${ui.tool === 'origin' ? 'primary' : ''}" data-tool-start="origin">${icon('target')} ${ui.tool === 'origin' ? 'Click a hole or stitch line…' : 'Add an origin point'}</button>
@@ -2180,6 +2227,11 @@
     }
     if (t.dataset.toolStart) {
       setTool(t.dataset.toolStart);
+      return;
+    }
+    if (t.dataset.holesBack) {
+      piece().removedHoles = [];
+      commit();
       return;
     }
     if (t.dataset.piece !== undefined) selectPiece(Number(t.dataset.piece));
@@ -3666,6 +3718,7 @@
     else if (k === 'r') setTool('round');
     else if (k === 'o') setTool('origin');
     else if (k === 'k') setTool('path');
+    else if (k === 'e') setTool('erase');
     else if ((k === 'delete' || k === 'backspace') && ['shape', 'notch', 'line', 'path'].includes(ui.sel.type)) deleteSelected();
     else if (ui.sel.type === 'path' && (k === 'h' || k === 's')) {
       selected('path').forEach((id) => {

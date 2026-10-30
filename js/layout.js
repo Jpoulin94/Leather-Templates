@@ -388,7 +388,43 @@
         kind: 'path',
         closed: !!p.closed,
       }));
-    return { settings, outline, cutouts, paths, holeRadius: settings.holeDiameter / 2, resolved };
+    const lay = { settings, outline, cutouts, paths, holeRadius: settings.holeDiameter / 2, resolved };
+    leaveOut(piece, lay);
+    return lay;
+  }
+
+  // Holes taken out by hand (`piece.removedHoles`: [{ on, x, y }]). Each is
+  // kept relative to the start of what it sits on (`on`: 'outline', a cut-out
+  // shape's id or a stitch path's id), so it follows that shape when it
+  // moves. Every other hole stays exactly where the spacing puts it; the
+  // ones taken out are listed in `skipped` so they can be put back.
+  const holeKey = (lay, lc) => (lc === lay.outline || !lc.src ? 'outline' : lc.src);
+
+  function anchorOf(piece, key) {
+    if (key === 'outline') return piece.outline.start || { x: 0, y: 0 };
+    const sh = (piece.cutouts || []).find((c) => c.id === key);
+    if (sh) return sh.start || { x: 0, y: 0 };
+    const pth = (piece.paths || []).find((p) => p.id === key);
+    return pth && pth.points.length ? pth.points[0] : null;
+  }
+
+  function leaveOut(piece, lay) {
+    const list = piece.removedHoles || [];
+    const tol = Math.min(0.5, lay.settings.spacing / 4);
+    allOf(lay).forEach((lc) => {
+      lc.skipped = [];
+      if (!list.length) return;
+      const key = holeKey(lay, lc);
+      const at = anchorOf(piece, key);
+      if (!at) return;
+      const spots = list.filter((r) => r.on === key).map((r) => ({ x: at.x + r.x, y: at.y + r.y }));
+      if (!spots.length) return;
+      lc.holes = lc.holes.filter((h) => {
+        const out = spots.some((q) => G.dist(q, h) < tol);
+        if (out) lc.skipped.push({ pt: h });
+        return !out;
+      });
+    });
   }
 
   // Everything laid out on a piece that can carry holes or stitching.
@@ -418,5 +454,5 @@
     return { type: 'line', a: G.add(origin.pt, G.mul(n, -half)), b: G.add(origin.pt, G.mul(n, half)) };
   }
 
-  LT.layout = { originTick, findRuns, layoutContour, layoutPiece, pathContour, allOf, pieceSettings, pieceBBox };
+  LT.layout = { originTick, holeKey, anchorOf, findRuns, layoutContour, layoutPiece, pathContour, allOf, pieceSettings, pieceBBox };
 })(typeof window !== 'undefined' ? window : globalThis);
