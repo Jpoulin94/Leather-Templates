@@ -177,3 +177,34 @@ test('a piece whose distance fix would run away still lays out (Money Clip Wood)
   assert.ok(list.length > 0);
   list.forEach((u) => u.fix.distance.forEach((f) => assert.ok(f.amount >= 0.5 && f.amount < 2)));
 });
+
+test('taking out middle holes leaves every other hole where it was', () => {
+  const pr = project();
+  const pc = pr.pieces[0];
+  const before = layout.layoutPiece(pr, pc).outline.holes;
+  const at = layout.anchorOf(pc, 'outline');
+  const out = before.slice(5, 8);
+  pc.removedHoles = out.map((h) => ({ on: 'outline', x: h.x - at.x, y: h.y - at.y }));
+  const lay = layout.layoutPiece(pr, pc);
+  assert.equal(lay.outline.holes.length, before.length - 3);
+  assert.equal(lay.outline.skipped.length, 3);
+  before.forEach((h, i) => assert.equal(hasPoint(lay.outline.holes, h.x, h.y), i < 5 || i >= 8));
+  // Survives saving and loading.
+  const again = model.normalizeProject(JSON.parse(JSON.stringify(pr)));
+  assert.equal(layout.layoutPiece(again, again.pieces[0]).outline.holes.length, before.length - 3);
+});
+
+test('a hole taken out of a stitch path follows the path when it moves', () => {
+  const pr = project();
+  const pc = pr.pieces[0];
+  const pth = model.newPath([{ x: 10, y: 30 }, { x: 40, y: 30 }]);
+  pc.paths = [pth];
+  pc.removedHoles = [{ on: pth.id, x: 15, y: 0 }];
+  let lc = layout.layoutPiece(pr, pc).paths[0];
+  assert.ok(!hasPoint(lc.holes, 25, 30));
+  assert.ok(hasPoint(lc.holes, 22, 30) && hasPoint(lc.holes, 28, 30));
+  pth.points = pth.points.map((p) => ({ x: p.x + 5, y: p.y + 2 }));
+  lc = layout.layoutPiece(pr, pc).paths[0];
+  assert.ok(!hasPoint(lc.holes, 30, 32));
+  assert.equal(lc.skipped.length, 1);
+});
