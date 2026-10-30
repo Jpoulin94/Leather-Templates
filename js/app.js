@@ -29,6 +29,7 @@
     rect: '<rect x="4" y="6" width="16" height="12" rx="1.5"/>',
     circle: '<circle cx="12" cy="12" r="8"/>',
     target: '<circle cx="12" cy="12" r="7"/><path d="M12 2v5M12 17v5M2 12h5M17 12h5"/>',
+    ruler: '<path d="M3 16L16 3l5 5L8 21z"/><path d="M7 12l2 2M10 9l1.5 1.5M13 6l2 2"/>',
     magnet: '<path d="M6 4v8a6 6 0 0012 0V4h-4v8a2 2 0 01-4 0V4z"/><path d="M6 8h4M14 8h4"/>',
     undo: '<path d="M9 7L4 12l5 5"/><path d="M4 12h11a5 5 0 010 10h-3"/>',
     redo: '<path d="M15 7l5 5-5 5"/><path d="M20 12H9a5 5 0 000 10h3"/>',
@@ -93,6 +94,7 @@
     linePick: null, // id of a new cut line waiting for a part to be picked
     guides: null, // { x, y } alignment guides while dragging
     mode: 'edit', // 'edit' | 'assemble'
+    measure: null, // { a, b } while the Measure tool is on (works in both modes)
     asmSel: null, // piece id picked in the assembly view
     alignTarget: 'outline',
     advOpen: false,
@@ -1377,6 +1379,7 @@
       if (g.y !== null && g.y !== undefined) out.push(`<path d="M${num(x0)} ${num(-g.y)}H${num(x0 + w / s)}" ${st}/>`);
     }
 
+    out.push(measureSvg(px));
     svg.innerHTML = out.join('');
     renderHint();
     renderZoom();
@@ -1385,7 +1388,9 @@
   function renderHint() {
     const c = drawContour();
     let msg = '';
-    if (ui.tool === 'draw') {
+    if (ui.measure) {
+      msg = measureHint();
+    } else if (ui.tool === 'draw') {
       msg = !c.start
         ? 'Click to place the first point.'
         : 'Click to add points · Shift for 15° steps · click the first point or press Enter to finish · Backspace removes the last line';
@@ -1428,6 +1433,8 @@
     const pct = $('#zoomPct');
     // 100% = true size on a 96 dpi screen.
     if (pct && ui.view) pct.textContent = `${Math.round((ui.view.scale / (96 / 25.4)) * 100)}%`;
+    const mb = $('[data-measure]');
+    if (mb) mb.classList.toggle('on', !!ui.measure);
   }
 
   // Origin tool: snap to the nearest hole, or else onto a stitch line.
@@ -1484,7 +1491,110 @@
     commit();
   }
 
+  // ---- Measure: click two points; snaps to holes, corners and edges, of
+  // this piece in Edit or of every shown piece in Assemble.
+  function measureTargets() {
+    if (ui.mode === 'assemble') {
+      const asm = AS.buildAssembly(project);
+      return {
+        points: asm.shown.flatMap((it) => [...it.holes, ...[it.outline, ...it.cutouts].flatMap((ps) => ps.map((q) => G.primStart(q)))]),
+        edges: asm.shown.flatMap((it) => [it.outline, ...it.cutouts]),
+      };
+    }
+    const lay = curLay();
+    return {
+      points: [
+        ...Lay.allOf(lay).flatMap((lc) => lc.holes),
+        ...allCorners(lay).map((c) => c.pt),
+        ...(piece().paths || []).flatMap((pth) => pth.points),
+      ],
+      edges: [lay.outline, ...lay.cutouts].map((lc) => lc.prims),
+    };
+  }
+
+  function measureSnap(pt) {
+    const tol = 10 / ui.view.scale;
+    const t = measureTargets();
+    let best = null;
+    t.points.forEach((q) => {
+      const d = G.dist(q, pt);
+      if (d <= tol && (!best || d < best.d)) best = { d, pt: q, kind: 'point' };
+    });
+    if (best) return best;
+    t.edges.forEach((prims) => {
+      const n = prims.length ? G.nearestOnPath(prims, pt) : null;
+      if (n && n.d <= tol && (!best || n.d < best.d)) best = { d: n.d, pt: n.pt, kind: 'edge' };
+    });
+    if (best) return best;
+    if (ui.snap) {
+      const st = minorStep();
+      return { pt: { x: Math.round(pt.x / st) * st, y: Math.round(pt.y / st) * st }, kind: 'grid' };
+    }
+    return { pt, kind: 'free' };
+  }
+
+  function toggleMeasure(on = !ui.measure) {
+    if (on && ui.mode === 'edit' && ui.tool !== 'select') setTool('select');
+    ui.measure = on ? { a: null, b: null } : null;
+    renderAll();
+  }
+
+  function measureClick(world) {
+    const m = ui.measure;
+    const p = measureSnap(world).pt;
+    if (!m.a || m.b) ui.measure = { a: p, b: null };
+    else m.b = p;
+    renderCanvas();
+  }
+
+  function measureText(a, b) {
+    const dx = Math.abs(b.x - a.x);
+    const dy = Math.abs(b.y - a.y);
+    return { all: `${fmt(G.dist(a, b))} ${units()}`, parts: `across ${fmt(dx)} · up ${fmt(dy)}` };
+  }
+
+  // The measurement on the drawing: the line, its ends, and the numbers.
+  function measureSvg(px) {
+    const m = ui.measure;
+    if (!m) return '';
+    const out = [];
+    const col = '#0b7285';
+    const hover = !m.b && ui.mouse ? measureSnap(ui.mouse) : null;
+    const a = m.a;
+    const b = m.b || (a && hover ? hover.pt : null);
+    const dot = (q, r) => `<circle cx="${num(q.x)}" cy="${num(-q.y)}" r="${num(px(r))}" fill="#fff" stroke="${col}" stroke-width="2" vector-effect="non-scaling-stroke" pointer-events="none"/>`;
+    if (a && b) {
+      out.push(`<path d="M${num(a.x)} ${num(-a.y)}H${num(b.x)}V${num(-b.y)}" fill="none" stroke="${col}" stroke-width="1" stroke-dasharray="3 3" opacity="0.6" vector-effect="non-scaling-stroke" pointer-events="none"/>`);
+      out.push(`<path d="M${num(a.x)} ${num(-a.y)}L${num(b.x)} ${num(-b.y)}" fill="none" stroke="${col}" stroke-width="2" vector-effect="non-scaling-stroke" pointer-events="none"/>`);
+      const t = measureText(a, b);
+      const mx = (a.x + b.x) / 2;
+      const my = -(a.y + b.y) / 2;
+      const fs = px(13);
+      const w = Math.max(t.all.length, t.parts.length) * fs * 0.56 + px(14);
+      out.push(`<g pointer-events="none"><rect x="${num(mx + px(10))}" y="${num(my - fs * 2.4)}" width="${num(w)}" height="${num(fs * 2.9)}" rx="${num(px(5))}" fill="#fff" stroke="${col}" stroke-width="1" vector-effect="non-scaling-stroke"/>
+        <text x="${num(mx + px(17))}" y="${num(my - fs * 1.15)}" font-size="${num(fs)}" font-weight="700" fill="${col}">${esc(t.all)}</text>
+        <text x="${num(mx + px(17))}" y="${num(my + fs * 0.2)}" font-size="${num(fs * 0.85)}" fill="${col}">${esc(t.parts)}</text></g>`);
+    }
+    if (a) out.push(dot(a, 4));
+    if (m.b) out.push(dot(m.b, 4));
+    else if (hover) out.push(dot(hover.pt, hover.kind === 'point' || hover.kind === 'edge' ? 5 : 3));
+    return out.join('');
+  }
+
+  function measureHint() {
+    const m = ui.measure;
+    if (m.a && m.b) {
+      const t = measureText(m.a, m.b);
+      return `${t.all} (${t.parts}) · click to measure again · M or Esc to stop`;
+    }
+    return m.a ? 'Click the second point · it snaps to holes, corners and edges' : 'Measure: click the first point · it snaps to holes, corners and edges · M or Esc to stop';
+  }
+
   function handleCanvasClick(target, world, shiftKey) {
+    if (ui.measure) {
+      measureClick(world);
+      return;
+    }
     if (ui.mode === 'assemble') {
       const el = target && target.closest ? target.closest('[data-asm]') : null;
       ui.asmSel = el ? el.dataset.asm : null;
@@ -1663,7 +1773,7 @@
   svg.addEventListener('pointerdown', (e) => {
     ui.ptr = { x: e.clientX, y: e.clientY, cx: ui.view.cx, cy: ui.view.cy, moved: false, target: e.target, button: e.button, shift: e.shiftKey };
     if (ui.mode === 'assemble') {
-      const el = e.button === 0 && e.target.closest ? e.target.closest('[data-asm]') : null;
+      const el = e.button === 0 && !ui.measure && e.target.closest ? e.target.closest('[data-asm]') : null;
       if (el) {
         const en = asmEntry(el.dataset.asm);
         ui.ptr.asmDrag = { id: el.dataset.asm, dx: Number(en.dx) || 0, dy: Number(en.dy) || 0 };
@@ -1671,7 +1781,7 @@
       svg.setPointerCapture(e.pointerId);
       return;
     }
-    const grab = e.button === 0 && ui.tool === 'select' && !ui.combine && !e.shiftKey && e.target.closest
+    const grab = e.button === 0 && ui.tool === 'select' && !ui.measure && !ui.combine && !e.shiftKey && e.target.closest
       ? e.target.closest('[data-shape]')
       : null;
     if (grab) {
@@ -1710,7 +1820,7 @@
         ui.view.cy = ui.ptr.cy + dy / ui.view.scale;
       }
       if (ui.ptr.moved) renderCanvas();
-    } else if (ui.tool === 'draw' || ui.tool === 'line' || ui.tool === 'path') {
+    } else if (ui.tool === 'draw' || ui.tool === 'line' || ui.tool === 'path' || ui.measure) {
       renderCanvas();
     }
   });
@@ -1729,7 +1839,7 @@
     if (p && !p.moved && p.button === 0) handleCanvasClick(p.target, toWorld(e), p.shift);
   });
   svg.addEventListener('pointerleave', () => {
-    if (!ui.ptr && (ui.tool === 'draw' || ui.tool === 'line' || ui.tool === 'path')) {
+    if (!ui.ptr && (ui.tool === 'draw' || ui.tool === 'line' || ui.tool === 'path' || ui.measure)) {
       ui.mouse = null;
       renderCanvas();
     }
@@ -1758,6 +1868,7 @@
   // Tool rail and zoom
 
   function setTool(tool) {
+    ui.measure = null;
     if (ui.combine) ui.combine = null;
     if (ui.trim && tool !== 'trim') {
       ui.trim = null;
@@ -1810,7 +1921,8 @@
       <button class="icon-btn" data-zoom="out" aria-label="Zoom out">${icon('minus')}</button>
       <span class="pct" id="zoomPct"></span>
       <button class="icon-btn" data-zoom="in" aria-label="Zoom in">${icon('plus')}</button>
-      <button class="icon-btn" data-zoom="fit" title="Fit to screen" aria-label="Fit to screen">${icon('fit')}</button>`;
+      <button class="icon-btn" data-zoom="fit" title="Fit to screen" aria-label="Fit to screen">${icon('fit')}</button>
+      <button class="icon-btn ${ui.measure ? 'on' : ''}" data-measure="1" title="Measure (M)" aria-label="Measure">${icon('ruler')}</button>`;
   }
 
   $('#rail').addEventListener('click', (e) => {
@@ -1829,6 +1941,10 @@
   $('#zoom').addEventListener('click', (e) => {
     const b = e.target.closest('button');
     if (!b) return;
+    if (b.dataset.measure) {
+      toggleMeasure();
+      return;
+    }
     if (b.dataset.zoom === 'fit') {
       fitView();
       renderCanvas();
@@ -3051,6 +3167,7 @@
     ui.linePick = null;
     ui.mode = mode;
     ui.view = null;
+    if (ui.measure) ui.measure = { a: null, b: null };
     clearSel();
     renderAll();
   }
@@ -3098,9 +3215,11 @@
     svg.setAttribute('viewBox', `${x0} ${y0} ${w / s} ${h / s}`);
     svg.setAttribute('class', 'mode-assemble');
     const asm = AS.buildAssembly(project);
-    svg.innerHTML = gridSvg(x0, y0, w / s, h / s, s) + assemblySvg(asm, { px: (n) => n / s, sel: ui.asmSel });
+    svg.innerHTML = gridSvg(x0, y0, w / s, h / s, s) + assemblySvg(asm, { px: (n) => n / s, sel: ui.asmSel }) + measureSvg((n) => n / s);
     const bad = asm.check.bad.length;
-    $('#hint').textContent = !asm.shown.length
+    $('#hint').textContent = ui.measure
+      ? measureHint()
+      : !asm.shown.length
       ? 'Tick the pieces to stack on the left.'
       : `${bad ? `${bad} hole${bad === 1 ? '' : 's'} don’t line up (red)` : 'All shared holes line up'} · drag a piece to move it · scroll to zoom`;
     renderZoom();
@@ -3461,6 +3580,10 @@
       return;
     }
     if (typing || $('#dialog').open) return;
+    if (!mod && (e.key.toLowerCase() === 'm' || (e.key === 'Escape' && ui.measure))) {
+      toggleMeasure(e.key === 'Escape' ? false : undefined);
+      return;
+    }
     if (ui.mode === 'assemble' && !mod) {
       if (e.key === 'Escape') {
         ui.asmSel = null;
