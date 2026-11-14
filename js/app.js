@@ -51,6 +51,7 @@
     x: '<path d="M6 6l12 12M18 6L6 18"/>',
     line: '<path d="M5 19L19 5"/><circle cx="5" cy="19" r="1.8"/><circle cx="19" cy="5" r="1.8"/>',
     stitchpath: '<path d="M4 18L10 8l6 6 4-8" stroke-dasharray="2 2.6"/><circle cx="4" cy="18" r="1.6"/><circle cx="10" cy="8" r="1.6"/><circle cx="16" cy="14" r="1.6"/><circle cx="20" cy="6" r="1.6"/>',
+    lock: '<rect x="5" y="11" width="14" height="9" rx="1.5"/><path d="M8 11V8a4 4 0 018 0v3"/>',
     erase: '<circle cx="12" cy="12" r="6"/><path d="M5 5l14 14"/>',
     scissors: '<circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M20 4L8.1 15.9M14.5 14.5L20 20M8.1 8.1L12 12"/>',
     slot: '<rect x="8" y="3" width="8" height="18" rx="4"/>',
@@ -361,6 +362,8 @@
   }
 
   function commit() {
+    // Shapes locked to the outline stay on it, whatever changed.
+    project.pieces.forEach((pc) => RS.applyStick(pc));
     const now = JSON.stringify(project);
     if (now !== history.last) {
       history.undo.push(history.last);
@@ -2569,6 +2572,11 @@
         <div class="align-label">Centre on its edge</div>
         <div class="align-grid four">${al('onTop', 'Top')}${al('onBottom', 'Bottom')}${al('onLeft', 'Left')}${al('onRight', 'Right')}</div>
         <p class="note">Or drag the shape on the drawing.</p></div>` : ''}
+      ${b ? `<div class="card"><h4>${icon('lock')} Lock to the outline</h4>
+        <div class="align-grid four">${RS.SIDES.map((k) => `<button class="${(sh.stick || []).includes(k) ? 'on' : ''}" data-stick="${k}">${k[0].toUpperCase()}${k.slice(1)}</button>`).join('')}</div>
+        <p class="note">${(sh.stick || []).length
+          ? `The ${sh.stick.join(' and ')} of this shape stays on the ${sh.stick.join(' and ')} of the outline when anything is resized${sh.stick.includes('top') && sh.stick.includes('bottom') || sh.stick.includes('left') && sh.stick.includes('right') ? ', so it stretches with the outline' : ', so the shape only grows the other way'}. Click again to unlock.`
+          : 'Pick a side to keep this shape’s side on the same side of the outline, even when you change sizes.'}</p></div>` : ''}
       <div class="card"><h4>${icon('edge')} Around this shape</h4>${modeSeg(commonValue(modes), 'data-shapemode')}</div>
       ${advancedSection(c)}
       <div class="row"><button class="small" id="chooseLines" title="Pick exactly which lines to keep">Choose lines…</button>
@@ -2989,6 +2997,15 @@
     if (t.dataset.toolStart) {
       if (t.dataset.toolStart === 'draw-outline') return startDraw('outline');
       return setTool(t.dataset.toolStart);
+    }
+    if (t.dataset.stick) {
+      const sh = shapeById(selected('shape')[0]);
+      if (!sh) return undefined;
+      const k = t.dataset.stick;
+      const on = (sh.stick || []).includes(k);
+      sh.stick = on ? sh.stick.filter((x) => x !== k) : [...(sh.stick || []), k];
+      if (!sh.stick.length) delete sh.stick;
+      return commit();
     }
     if (t.dataset.op) {
       const sh = shapeById(selected('shape')[0]);

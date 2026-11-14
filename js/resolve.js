@@ -560,6 +560,7 @@
         l.b = { x: l.b.x + tx, y: l.b.y + ty };
       });
     });
+    applyStick(piece);
   }
 
   // lines: the piece's cut lines; the ones drawn across this shape follow it.
@@ -573,5 +574,43 @@
     });
   }
 
-  LT.resolve = { resolvePiece, lineChord, ccwTagged, primsToContour, notchSegments, notchPlace, OPS, isCircle, rawBox, resizeContour, resizePiece, resizeShape, shiftEdge };
+  // Shapes locked to the outline (`shape.stick`: any of 'top', 'bottom',
+  // 'left', 'right'): each locked side sits on the same side of the outline,
+  // whatever else changes. Lock both opposite sides and the shape stretches
+  // to span the outline that way.
+  const SIDES = ['top', 'bottom', 'left', 'right'];
+
+  function shiftShape(sh, dx, dy, lines) {
+    sh.start = { x: r4(sh.start.x + dx), y: r4(sh.start.y + dy) };
+    LT.model.mapOrigins(sh, (o) => ({ x: o.x + dx, y: o.y + dy }));
+    (lines || []).forEach((l) => {
+      if (l.target !== sh.id) return;
+      l.a = { x: r4(l.a.x + dx), y: r4(l.a.y + dy) };
+      l.b = { x: r4(l.b.x + dx), y: r4(l.b.y + dy) };
+    });
+  }
+
+  function applyStick(piece) {
+    const T = rawBox(piece.outline);
+    if (!T) return;
+    (piece.cutouts || []).forEach((sh) => {
+      const has = (k) => (sh.stick || []).includes(k);
+      if (!SIDES.some(has) || !sh.start) return;
+      let S = rawBox(sh);
+      if (!S) return;
+      if (!isCircle(sh)) {
+        const w = has('left') && has('right') ? T.maxX - T.minX : NaN;
+        const h = has('top') && has('bottom') ? T.maxY - T.minY : NaN;
+        if (Math.abs(w - (S.maxX - S.minX)) > 1e-6 || Math.abs(h - (S.maxY - S.minY)) > 1e-6) {
+          resizeShape(sh, w, h, piece.lines);
+          S = rawBox(sh);
+        }
+      }
+      const dx = has('left') ? T.minX - S.minX : has('right') ? T.maxX - S.maxX : 0;
+      const dy = has('top') ? T.maxY - S.maxY : has('bottom') ? T.minY - S.minY : 0;
+      if (Math.abs(dx) > 1e-9 || Math.abs(dy) > 1e-9) shiftShape(sh, dx, dy, piece.lines);
+    });
+  }
+
+  LT.resolve = { applyStick, SIDES, resolvePiece, lineChord, ccwTagged, primsToContour, notchSegments, notchPlace, OPS, isCircle, rawBox, resizeContour, resizePiece, resizeShape, shiftEdge };
 })(typeof window !== 'undefined' ? window : globalThis);
