@@ -234,3 +234,30 @@ test('a shape locked to the top of the outline stays there through resizes', () 
   const b = R.rawBox(sh), o = R.rawBox(pc.outline);
   assert.ok(near(b.maxY, o.maxY) && near(b.minY, o.minY));
 });
+
+test('a circle notch: set by diameter and depth, on the outline or on a shape', () => {
+  const pr = project();
+  const pc = pr.pieces[0]; // 100 x 60, bottom-left at 0,0
+  const R = LT.resolve;
+  const n = { ...model.newNotch(2, 20, 10), shape: 'circle', diameter: 20, depth: 15 };
+  assert.ok(near(R.notchWidth(n), 2 * Math.sqrt(15 * 5)));
+  // On the outline's top edge (edge 2 of the default rectangle).
+  pc.notches = [n];
+  let res = R.resolvePiece(pc);
+  let b = G.bbox(G.buildPrimitives(res.outline));
+  assert.ok(near(b.maxY, 60, 1e-6));
+  assert.ok(res.report.notches[n.id].ok);
+  // The lowest point of the notch is 15 below the top edge.
+  const prims = G.buildPrimitives(res.outline).filter((p) => p.type === 'arc');
+  const low = Math.min(...prims.map((p) => p.c.y - p.r));
+  assert.ok(near(low, 45, 1e-3));
+  // On a shape's edge instead: the outline is untouched.
+  const sh = model.newShape(model.rectangle(40, 30, 0, 30, 10, 'none'));
+  pc.cutouts.push(sh);
+  n.on = sh.id;
+  res = R.resolvePiece(pc);
+  assert.equal(G.buildPrimitives(res.outline).filter((p) => p.type === 'arc').length, 0);
+  const hole = res.cutouts.find((c) => c.src === sh.id);
+  assert.ok(G.buildPrimitives(hole.contour).some((p) => p.type === 'arc'));
+  assert.ok(res.report.notches[n.id].ok);
+});

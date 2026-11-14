@@ -103,6 +103,8 @@
     stitchOpen: pref('stitchOpen', true),
     highlight: null, // uneven side (index + 1) to show on the drawing
     pathDraft: null, // points of a stitch path being drawn
+    pathSquare: true, // stitch paths drawn at right angles only
+    pathCount: null, // holes per leg while drawing (null: any length)
     unevenHover: null,
     clash: null, // flagged edge hovered in the Stitching section
   };
@@ -591,6 +593,7 @@
       const ids = ui.sel.items.filter((id) => id !== 'outline');
       if (!ids.length) return;
       pc.cutouts = pc.cutouts.filter((c) => !ids.includes(c.id));
+      pc.notches = (pc.notches || []).filter((n) => !ids.includes(n.on));
       ids.forEach((id) => dropLinesOn(id));
       toast(ids.length > 1 ? 'Shapes deleted. Undo brings them back.' : 'Shape deleted. Undo brings it back.');
     } else if (ui.sel.type === 'line') {
@@ -706,6 +709,8 @@
     const tol = 10 / ui.view.scale;
     const draft = ui.pathDraft || [];
     if (draft.length >= 3 && G.dist(pt, draft[0]) <= tol) return { ...draft[0], closes: true };
+    const last = draft[draft.length - 1];
+    if (last && (ui.pathSquare || ui.pathCount) && !ui.shift) return squarePathPoint(pt, last, tol);
     let best = null;
     const near = (q, kind) => {
       const d = G.dist(q, pt);
@@ -716,7 +721,6 @@
     (piece().paths || []).forEach((p) => p.points.forEach((q) => near(q, 'point')));
     draft.forEach((q) => near(q, 'point'));
     if (best) return { ...best.pt, snapped: best.kind };
-    const last = draft[draft.length - 1];
     if (last && ui.shift) {
       const d = G.sub(pt, last);
       const a = Math.round(Math.atan2(d.y, d.x) / G.rad(15)) * G.rad(15);
@@ -729,6 +733,44 @@
       return { x: Math.round(pt.x / st) * st, y: Math.round(pt.y / st) * st };
     }
     return pt;
+  }
+
+  // Drawing a stitch path at right angles: the leg runs straight across or
+  // straight up from the last point, a whole number of hole spaces long so
+  // every hole keeps the spacing, or exactly the number of holes asked for
+  // (the hole it starts from counts as the first). Near a hole, it lines up
+  // with that hole.
+  function squarePathPoint(pt, last, tol) {
+    const sp = project.defaults.spacing;
+    const d = G.sub(pt, last);
+    let dir = ui.pathSquare
+      ? Math.abs(d.x) >= Math.abs(d.y) ? { x: Math.sign(d.x) || 1, y: 0 } : { x: 0, y: Math.sign(d.y) || 1 }
+      : G.len(d) > 1e-9 ? G.norm(d) : { x: 1, y: 0 };
+    let L = d.x * dir.x + d.y * dir.y;
+    if (L < 0) {
+      dir = G.mul(dir, -1);
+      L = -L;
+    }
+    let snapped = null;
+    if (ui.pathCount) {
+      L = (ui.pathCount - 1) * sp;
+    } else {
+      // Level with a hole near the pointer, if one is in reach.
+      let best = null;
+      Lay.allOf(curLay()).forEach((lc) => lc.holes.forEach((h) => {
+        const along = (h.x - last.x) * dir.x + (h.y - last.y) * dir.y;
+        const q = G.add(last, G.mul(dir, along));
+        const dd = G.dist(q, pt);
+        if (along > 1e-6 && G.dist(h, pt) <= tol * 2 && (!best || dd < best.d)) best = { d: dd, along };
+      }));
+      if (best) {
+        L = best.along;
+        snapped = 'hole';
+      }
+      if (sp > 0) L = Math.max(1, Math.round(L / sp)) * sp;
+    }
+    const q = G.add(last, G.mul(dir, L));
+    return { x: q.x, y: q.y, snapped, holes: sp > 0 ? Math.round(L / sp) + 1 : null };
   }
 
   function addPathPoint(world) {
@@ -1222,6 +1264,16 @@
       }
     });
 
+    // Shapes grouped with the selected one: a dashed accent ring.
+    if (!combining && selShape.size) {
+      const mates = new Set();
+      selShape.forEach((id) => groupOf(shapeById(id)).forEach((o) => !selShape.has(o.id) && mates.add(o)));
+      mates.forEach((o) => {
+        const prims = G.buildPrimitives(o);
+        if (prims.length) out.push(`<path d="${R.pathData(prims, flip, true)}" fill="none" stroke="var(--accent)" stroke-width="1.2" stroke-dasharray="4 3" vector-effect="non-scaling-stroke" pointer-events="none"/>`);
+      });
+    }
+
     // Remove holes: every hole (and every hole taken out) is clickable.
     if (ui.tool === 'erase' && !combining) {
       Lay.allOf(lay).forEach((lc) => {
@@ -1363,7 +1415,7 @@
         const last = pts[pts.length - 1];
         if (last) {
           const d = G.sub(m, last);
-          const lbl = `${fmt(G.len(d))} ${units()} · ${num(Math.round(((G.deg(Math.atan2(d.y, d.x)) % 360) + 360) % 360 * 10) / 10)}°`;
+          const lbl = `${m.holes ? `${m.holes} holes · ` : ''}${fmt(G.len(d))} ${units()} · ${num(Math.round(((G.deg(Math.atan2(d.y, d.x)) % 360) + 360) % 360 * 10) / 10)}°`;
           out.push(`<g transform="translate(${num(m.x + px(12))} ${num(-m.y - px(12))})" pointer-events="none"><rect x="0" y="${num(-px(15))}" width="${num(px(lbl.length * 6.6 + 12))}" height="${num(px(20))}" rx="${num(px(5))}" fill="var(--ink)"/><text x="${num(px(6))}" y="${num(-px(1))}" font-size="${num(px(12))}" fill="var(--bg)">${esc(lbl)}</text></g>`);
         }
       }
@@ -1819,8 +1871,10 @@
     if (ui.mode === 'assemble') {
       const el = e.button === 0 && !ui.measure && e.target.closest ? e.target.closest('[data-asm]') : null;
       if (el) {
-        const en = asmEntry(el.dataset.asm);
-        ui.ptr.asmDrag = { id: el.dataset.asm, dx: Number(en.dx) || 0, dy: Number(en.dy) || 0 };
+        ui.ptr.asmDrag = {
+          id: el.dataset.asm,
+          items: asmMovers(el.dataset.asm).map((id) => ({ id, dx: Number(asmEntry(id).dx) || 0, dy: Number(asmEntry(id).dy) || 0 })),
+        };
       }
       svg.setPointerCapture(e.pointerId);
       return;
@@ -1832,7 +1886,8 @@
       const sh = shapeById(grab.dataset.shape);
       // Dragging one of several selected shapes moves them all.
       const ids = ui.sel.type === 'shape' && ui.sel.items.includes(sh && sh.id) ? ui.sel.items.filter((x) => x !== 'outline') : [sh && sh.id];
-      const list = ids.map((id) => shapeById(id)).filter((x) => x && x.start);
+      // Grouped shapes come along too.
+      const list = [...new Set(ids.map((id) => shapeById(id)).flatMap((x) => groupOf(x)))].filter((x) => x && x.start);
       if (list.length) ui.ptr.drag = startDrag(list);
     }
     svg.setPointerCapture(e.pointerId);
@@ -1853,9 +1908,11 @@
           mx = Math.round(mx / st) * st;
           my = Math.round(my / st) * st;
         }
-        const en = asmEntry(d.id, true);
-        en.dx = round(d.dx + mx);
-        en.dy = round(d.dy + my);
+        d.items.forEach((it) => {
+          const en = asmEntry(it.id, true);
+          en.dx = round(it.dx + mx);
+          en.dy = round(it.dy + my);
+        });
         ui.asmSel = d.id;
       } else if (ui.ptr.moved && ui.ptr.drag) {
         dragTo(ui.ptr.drag, dx / ui.view.scale, -dy / ui.view.scale);
@@ -2464,10 +2521,10 @@
       } else if (e) {
         detail = `<p class="ok">Closing edge, ${fmt(G.primLength(e))} ${units()} long. It joins the last point back to the start.</p>`;
       }
-      if (r.kind === 'o' && e && e.type === 'line') {
+      if ((r.kind === 'o' || r.kind === 'c') && e && e.type === 'line') {
         notchBtn = `<div class="card"><h4>${icon('notch')} Notch</h4>
           <button class="small" id="addNotch">${icon('plus')} Add a notch to this edge</button>
-          <p class="note">A thumb notch or scoop, centred on the edge. You can set its width, depth and position next.</p></div>`;
+          <p class="note">A thumb notch or scoop, centred on the edge. You can set its diameter, depth and position next.</p></div>`;
       }
     }
     const wheres = [...new Set(items.map(refWhere))];
@@ -2505,7 +2562,8 @@
     const n = notchById(selected('notch')[0]);
     const lay = curLay();
     const rep = (lay.resolved.report.notches || {})[n.id] || {};
-    const e = G.buildEdges(piece().outline).find((x) => x.edge === n.edge);
+    const onC = n.on ? shapeById(n.on) : piece().outline;
+    const e = onC && G.buildEdges(onC).find((x) => x.edge === n.edge);
     const ends = e && e.type === 'line' ? edgeEnds(e) : ['start', 'end'];
     const centred = n.at === null || n.at === undefined;
     const at = rep.at !== undefined ? rep.at : n.at || 0;
@@ -2514,22 +2572,31 @@
     const cR = (n.corners && n.corners.R) || {};
     const fil = commonValue([Number(cL.fillet) || 0, Number(cR.fillet) || 0]);
     const square = n.shape === 'square';
-    const shape = square ? 'square' : Math.abs(n.depth - n.width / 2) < 1e-6 ? 'half circle' : n.depth < n.width / 2 ? 'shallow scoop' : 'oblong';
+    const circ = n.shape === 'circle';
+    const mouth = RS.notchWidth(n);
+    const shape = circ ? `${fmt(n.diameter)} ${units()} circle` : square ? 'square' : Math.abs(n.depth - n.width / 2) < 1e-6 ? 'half circle' : n.depth < n.width / 2 ? 'shallow scoop' : 'oblong';
     const bl = (n.corners && n.corners.BL) || {};
     const br = (n.corners && n.corners.BR) || {};
     const bfil = commonValue([Number(bl.fillet) || 0, Number(br.fillet) || 0]);
     const warn = rep.ok === false
       ? `<div class="warn">${rep.reason === 'overlap' ? 'This notch overlaps another notch on the same edge.' : rep.reason === 'curve' ? 'Notches only fit on straight edges.' : `The notch is wider than its edge (${fmt(L)} ${units()}).`}</div>`
       : '';
-    return `${head('notch', 'Notch', `${fmt(n.width)} × ${fmt(n.depth)} ${units()} · ${shape}`)}
-      ${warn}
+    const tooDeep = circ && !(Number(n.depth) < Number(n.diameter));
+    return `${head('notch', n.on ? `Notch on shape ${shapeNo(n.on)}` : 'Notch', circ ? `${shape}, ${fmt(n.depth)} ${units()} deep` : `${fmt(n.width)} × ${fmt(n.depth)} ${units()} · ${shape}`)}
+      ${warn}${tooDeep ? `<div class="warn">The depth has to be less than the diameter.</div>` : ''}
       <div class="card"><h4>Shape</h4><div class="seg wide">
-        <button class="${square ? '' : 'on'}" data-notchshape="round">Round</button><button class="${square ? 'on' : ''}" data-notchshape="square">Square</button></div></div>
-      <div class="card"><h4>Size</h4><div class="grid2">
+        <button class="${circ ? 'on' : ''}" data-notchshape="circle">Circle</button><button class="${!circ && !square ? 'on' : ''}" data-notchshape="round">Scoop</button><button class="${square ? 'on' : ''}" data-notchshape="square">Square</button></div></div>
+      ${circ ? `<div class="card"><h4>Size</h4><div class="grid2">
+        <label class="fld"><span>Circle diameter</span>${numInput('id="notchDia"', n.diameter)}</label>
+        <label class="fld"><span>Depth into the edge</span>${numInput('id="notchD"', n.depth)}</label></div>
+        <p class="note">${mouth > 0 ? `It’s ${fmt(mouth)} ${units()} wide where it meets the edge. ` : ''}Depth is how far the circle reaches in from the edge; more than half the diameter makes it wider inside than at the edge.</p></div>` : `<div class="card"><h4>Size</h4><div class="grid2">
         <label class="fld"><span>Width</span>${numInput('id="notchW"', n.width)}</label>
         <label class="fld"><span>Depth</span>${numInput('id="notchD"', n.depth)}</label></div>
         ${square ? '' : `<div class="chips"><button data-notch-depth="half">Half circle</button><button data-notch-depth="shallow">Shallow</button><button data-notch-depth="oblong">Oblong</button></div>
-        <p class="note">Depth half the width makes a half circle; less makes a shallow scoop; more makes an oblong U.</p>`}</div>
+        <p class="note">Depth half the width makes a half circle; less makes a shallow scoop; more makes an oblong U.</p>`}</div>`}
+      <div class="card"><h4>Direction</h4><div class="seg wide">
+        <button class="${n.out ? '' : 'on'}" data-notchdir="in">Cuts in</button><button class="${n.out ? 'on' : ''}" data-notchdir="out">Sticks out</button></div>
+        <p class="note">${n.on ? 'Cuts in goes into the shape; sticks out goes away from it.' : 'Cuts in takes a bite out of the piece; sticks out adds a tab.'}</p></div>
       <div class="card"><h4>Position</h4>
         <label class="switch"><span>Centred on the edge</span><input type="checkbox" id="notchCentred" ${centred ? 'checked' : ''}></label>
         ${centred ? '' : `<label class="fld" style="margin-top:8px"><span>Centre, from the ${ends[0]} end (edge is ${fmt(L)} ${units()})</span>${numInput('id="notchAt"', at)}</label>`}</div>
@@ -2577,6 +2644,8 @@
         <p class="note">${(sh.stick || []).length
           ? `The ${sh.stick.join(' and ')} of this shape stays on the ${sh.stick.join(' and ')} of the outline when anything is resized${sh.stick.includes('top') && sh.stick.includes('bottom') || sh.stick.includes('left') && sh.stick.includes('right') ? ', so it stretches with the outline' : ', so the shape only grows the other way'}. Click again to unlock.`
           : 'Pick a side to keep this shape’s side on the same side of the outline, even when you change sizes.'}</p></div>` : ''}
+      ${orderCard(sh)}
+      ${groupCard(sh)}
       <div class="card"><h4>${icon('edge')} Around this shape</h4>${modeSeg(commonValue(modes), 'data-shapemode')}</div>
       ${advancedSection(c)}
       <div class="row"><button class="small" id="chooseLines" title="Pick exactly which lines to keep">Choose lines…</button>
@@ -2627,6 +2696,41 @@
       <div class="row" style="margin-top:12px"><button class="primary" id="applyTrim" ${n ? '' : 'disabled'}>Apply</button><button class="ghost" id="cancelTrim">Cancel</button></div>`;
   }
 
+  // Shapes are worked out in order, back to front, so a shape further
+  // forward cuts or merges after the ones behind it.
+  function orderCard(sh) {
+    const pc = piece();
+    const i = pc.cutouts.indexOf(sh);
+    const n = pc.cutouts.length;
+    if (n < 2) return '';
+    const b = (k, label, off) => `<button data-order="${k}" ${off ? 'disabled' : ''}>${label}</button>`;
+    return `<div class="card"><h4>${icon('shape')} Order</h4>
+      <div class="align-grid four">${b('back', 'To back', i === 0)}${b('down', 'Back', i === 0)}${b('up', 'Forward', i === n - 1)}${b('front', 'To front', i === n - 1)}</div>
+      <p class="note">${i + 1} of ${n}, counting from the back. Shapes in front are drawn on top and cut after the ones behind. [ and ] keys work too.</p></div>`;
+  }
+
+  function moveOrder(list, item, how) {
+    const i = list.indexOf(item);
+    if (i < 0) return false;
+    const j = { back: 0, front: list.length - 1, down: Math.max(0, i - 1), up: Math.min(list.length - 1, i + 1) }[how];
+    if (j === undefined || j === i) return false;
+    list.splice(i, 1);
+    list.splice(j, 0, item);
+    return true;
+  }
+
+  // Shapes grouped together move together.
+  const groupOf = (sh, pc = piece()) => (sh && sh.group ? pc.cutouts.filter((o) => o.group === sh.group) : sh ? [sh] : []);
+
+  function groupCard(sh) {
+    const mates = groupOf(sh).filter((o) => o !== sh);
+    return `<div class="card"><h4>${icon('copy')} Group</h4>
+      ${mates.length
+        ? `<p class="note" style="margin-top:0">Moves together with ${mates.map((o) => `Shape ${shapeNo(o.id)}`).join(', ')}.</p>
+          <div class="row"><button class="small" data-ungroup="one">Take this one out</button><button class="small" data-ungroup="all">Ungroup all</button></div>`
+        : '<p class="note" style="margin-top:0">Shift-click other shapes, then press Group, to make them move together.</p>'}</div>`;
+  }
+
   // Several things picked with Shift: line them up.
   function renderMultiInspector() {
     const items = selected('shape');
@@ -2641,6 +2745,8 @@
         <button class="small block" data-alignmany="centre" style="margin-bottom:8px">Centre both ways</button>
         <div class="align-grid four">${al('left', 'Left')}${al('right', 'Right')}${al('top', 'Top')}${al('bottom', 'Bottom')}</div>
         <p class="note">${moving ? `${moving === 1 ? 'The other one moves' : `The other ${moving} move`} to match ${anchor === 'outline' ? 'the outline' : 'the first one you picked'}.` : 'Shift-click another shape to line it up.'} Shift-click inside the piece to line up with the outline.</p></div>
+      ${items.filter((x) => x !== 'outline').length > 1 ? `<div class="card"><h4>${icon('copy')} Group</h4><button class="small block" data-group="1">Group these shapes</button>
+        <p class="note">Grouped shapes move together when you drag one or change its position.</p></div>` : ''}
       <div class="row">${items.some((x) => x !== 'outline') ? `<button class="small danger" id="delShape">${icon('trash')} Delete shapes</button>` : ''}<button class="small ghost" data-deselect="1">Done</button></div>`;
   }
 
@@ -2655,7 +2761,10 @@
   function renderPathToolInspector() {
     const n = (ui.pathDraft || []).length;
     return `${head('stitchpath', 'Stitch path', n ? `${n} point${n === 1 ? '' : 's'} so far` : 'Click the first point')}
-      <div class="tip">${icon('info')}<div>Click to place points; each click carries the line on from the last one. Points snap to holes, corners and the grid, and Shift gives 15° steps. Click the first point to close it into a loop. It never cuts the leather: it only carries holes or a stitch line.</div></div>
+      <div class="tip">${icon('info')}<div>Click a hole to start, then click to carry the line on. Each leg is a whole number of hole spaces, so the spacing stays exact. Click the first point to close it into a loop. It never cuts the leather: it only carries holes or a stitch line.</div></div>
+      <div class="card"><label class="switch"><span>Right angles only</span><input type="checkbox" id="pathSquare" ${ui.pathSquare ? 'checked' : ''}></label>
+        <label class="fld" style="margin-top:8px"><span>Holes per leg (counting the one it starts from)</span><input type="text" inputmode="numeric" id="pathCount" value="${ui.pathCount || ''}" placeholder="Any"></label>
+        <p class="note">${ui.pathCount ? `Each leg is ${ui.pathCount} holes: ${ui.pathCount - 1} more after the one it starts from. Point the way you want it to go and click.` : 'Leave it empty to set the length with the mouse; it still snaps to whole hole spaces.'} Hold Shift to draw at any angle.</p></div>
       <div class="row"><button class="primary" id="finishPath" ${n > 1 ? '' : 'disabled'}>${icon('check')} Finished</button><button id="undoPathPoint" ${n ? '' : 'disabled'}>Remove last point</button></div>
       <button class="ghost" data-tool-start="select" style="margin-top:8px">Cancel</button>`;
   }
@@ -2667,6 +2776,7 @@
     for (let k = 0; k + 1 < n; k++) legs.push(G.dist(pth.points[k], pth.points[k + 1]));
     if (pth.closed) legs.push(G.dist(pth.points[n - 1], pth.points[0]));
     const total = legs.reduce((a, b) => a + b, 0);
+    const sp = project.defaults.spacing;
     const lc = curLay().paths.find((x) => x.src === pth.id);
     const holes = lc ? lc.holes.length : 0;
     return `${head('stitchpath', `Stitch path ${pathNo(pth.id)}`, `${fmt(total)} ${units()} long${pth.mode === 'holes' ? ` · ${holes} holes` : ''}`)}
@@ -2675,9 +2785,13 @@
         .join('')}</div>
         <p class="note">Holes sit right on the line. Each bend gets a hole; click a bend’s dot to switch it off, or round it with Round corners.</p></div>
       <div class="card"><h4>Legs</h4><div class="grid2">${legs
-        .map((L, k) => `<label class="fld"><span>Leg ${k + 1}</span>${numInput(`data-pathleg="${k}"`, L)}</label>`)
+        .map((L, k) => {
+          const holesIn = sp > 0 && Math.abs(L / sp - Math.round(L / sp)) < 1e-3 ? String(Math.round(L / sp) + 1) : '';
+          return `<label class="fld"><span>Leg ${k + 1} length</span>${numInput(`data-pathleg="${k}"`, L)}</label>
+            <label class="fld"><span>Leg ${k + 1} holes</span><input type="text" inputmode="numeric" data-pathcount="${k}" value="${holesIn}" placeholder="—"></label>`;
+        })
         .join('')}</div>
-        <p class="note">Changing a leg moves the points after it.</p></div>
+        <p class="note">Holes counts both ends of the leg, so 4 holes is 3 spaces. Changing a leg moves the points after it.</p></div>
       <div class="card"><h4>Start point</h4><div class="grid2">
         <label class="fld"><span>X</span>${numInput('data-pathstart="x"', pth.points[0].x)}</label>
         <label class="fld"><span>Y</span>${numInput('data-pathstart="y"', pth.points[0].y)}</label></div>
@@ -2788,9 +2902,10 @@
   // Keep notches pointing at the right edges when outline edges change.
   function shiftNotches(fromIdx, delta, removedIdx) {
     const pc = piece();
-    pc.notches = (pc.notches || []).filter((n) => n.edge !== removedIdx);
+    const mine = (n) => !n.on;
+    pc.notches = (pc.notches || []).filter((n) => !mine(n) || n.edge !== removedIdx);
     pc.notches.forEach((n) => {
-      if (n.edge >= fromIdx) n.edge += delta;
+      if (mine(n) && n.edge >= fromIdx) n.edge += delta;
     });
   }
 
@@ -2805,6 +2920,23 @@
     }
     if (t.id === 'pieceName') {
       pc.name = t.value.trim() || pc.name;
+      return commit();
+    }
+    if (t.id === 'pathSquare') {
+      ui.pathSquare = t.checked;
+      return renderAll();
+    }
+    if (t.id === 'pathCount') {
+      const v = Math.round(Number(t.value));
+      ui.pathCount = t.value.trim() && Number.isFinite(v) && v >= 2 ? v : null;
+      if (t.value.trim() && !ui.pathCount) toast('Use 2 or more holes, or leave it empty.');
+      return renderAll();
+    }
+    if (t.dataset.pathcount !== undefined) {
+      const pth = pathById(selected('path')[0]);
+      const v = Math.round(Number(t.value));
+      if (!pth || !Number.isFinite(v) || v < 2) return bad(t);
+      setPathLeg(pth, Number(t.dataset.pathcount), (v - 1) * project.defaults.spacing);
       return commit();
     }
     if (t.dataset.pathleg !== undefined || t.dataset.pathstart || t.id === 'pathClosed') {
@@ -2879,11 +3011,13 @@
     // Notch fields
     const n = ui.sel.type === 'notch' ? notchById(ui.sel.items[0]) : null;
     if (n) {
-      if (t.id === 'notchW' || t.id === 'notchD') {
+      if (t.id === 'notchW' || t.id === 'notchD' || t.id === 'notchDia') {
         const v = M.parseLength(t.value, units());
         if (!Number.isFinite(v) || v <= 0) return bad(t);
         if (t.id === 'notchW') n.width = v;
+        else if (t.id === 'notchDia') n.diameter = v;
         else n.depth = v;
+        if (n.shape === 'circle') n.width = round(RS.notchWidth(n)) || n.width;
         return commit();
       }
       if (t.id === 'notchCentred') {
@@ -2902,8 +3036,8 @@
       const v = M.parseLength(t.value, units());
       const b = RS.rawBox(c);
       if (!Number.isFinite(v) || !b) return bad(t);
-      if (t.id === 'posX') moveContour(c, v - (b.minX + b.maxX) / 2, 0);
-      else moveContour(c, 0, v - (b.minY + b.maxY) / 2);
+      const [dx, dy] = t.id === 'posX' ? [v - (b.minX + b.maxX) / 2, 0] : [0, v - (b.minY + b.maxY) / 2];
+      (c === pc.outline ? [c] : groupOf(c)).forEach((x) => moveContour(x, dx, dy));
       return commit();
     }
     if (t.id === 'startX' || t.id === 'startY') {
@@ -2973,7 +3107,24 @@
     if (t.dataset.notchshape) {
       const n = notchById(selected('notch')[0]);
       if (!n) return undefined;
-      n.shape = t.dataset.notchshape;
+      const to = t.dataset.notchshape;
+      if (to === 'circle' && n.shape !== 'circle') {
+        // The circle that makes the same mouth and depth.
+        const w2 = (Number(n.width) || 0) / 2;
+        const d = Number(n.depth) || 0;
+        n.diameter = round(d > 0 && d <= w2 ? (w2 * w2 + d * d) / d : 2 * w2);
+        if (!(d < n.diameter)) n.depth = round(n.diameter / 2);
+      } else if (to !== 'circle' && n.shape === 'circle') {
+        n.width = round(RS.notchWidth(n)) || n.width;
+      }
+      n.shape = to;
+      return commit();
+    }
+    if (t.dataset.notchdir) {
+      const n = notchById(selected('notch')[0]);
+      if (!n) return undefined;
+      if (t.dataset.notchdir === 'out') n.out = true;
+      else delete n.out;
       return commit();
     }
     if (t.dataset.shapemode) {
@@ -2997,6 +3148,31 @@
     if (t.dataset.toolStart) {
       if (t.dataset.toolStart === 'draw-outline') return startDraw('outline');
       return setTool(t.dataset.toolStart);
+    }
+    if (t.dataset.order) {
+      const sh = shapeById(selected('shape')[0]);
+      if (sh && moveOrder(piece().cutouts, sh, t.dataset.order)) return commit();
+      return undefined;
+    }
+    if (t.dataset.group) {
+      const ids = selected('shape').filter((x) => x !== 'outline');
+      const gid = M.uid();
+      piece().cutouts.forEach((o) => {
+        if (ids.includes(o.id)) o.group = gid;
+      });
+      toast(`Grouped ${ids.length} shapes.`);
+      return commit();
+    }
+    if (t.dataset.ungroup) {
+      const sh = shapeById(selected('shape')[0]);
+      if (!sh) return undefined;
+      const gid = sh.group;
+      const list = t.dataset.ungroup === 'all' ? groupOf(sh) : [sh];
+      list.forEach((o) => delete o.group);
+      // A group of one is no group.
+      const rest = piece().cutouts.filter((o) => gid && o.group === gid);
+      if (rest.length === 1) delete rest[0].group;
+      return commit();
     }
     if (t.dataset.stick) {
       const sh = shapeById(selected('shape')[0]);
@@ -3043,7 +3219,7 @@
         const mode = c === pc.outline ? 'holes' : 'none';
         // A notch on the old closing edge stays on the closing edge.
         if (c === pc.outline) (pc.notches || []).forEach((n) => {
-          if (n.edge === c.segments.length) n.edge += 1;
+          if (!n.on && n.edge === c.segments.length) n.edge += 1;
         });
         c.segments.push(t.id === 'addLine'
           ? M.seg('line', { length: inch() ? 25.4 : 20, angle, mode })
@@ -3069,11 +3245,13 @@
         return renderAll();
       case 'addNotch': {
         const r = parseRef(selected('edge')[0]);
-        const e = G.buildEdges(pc.outline).find((x) => x.edge === r.idx);
+        const on = r.kind === 'c' ? shapeById(r.id) : pc.outline;
+        const e = on && G.buildEdges(on).find((x) => x.edge === r.idx);
         if (!e) return undefined;
         const L = G.primLength(e);
         const w = round(Math.min(inch() ? 19.05 : 20, L * 0.6));
-        const n = M.newNotch(r.idx, w, round(w / 2));
+        const n = { ...M.newNotch(r.idx, w, round(w / 2)), shape: 'circle', diameter: w };
+        if (r.kind === 'c') n.on = r.id;
         pc.notches = pc.notches || [];
         pc.notches.push(n);
         ui.sel = { type: 'notch', items: [n.id] };
@@ -3125,7 +3303,7 @@
       onRight: [T.maxX - scx, 0],
     };
     const [dx, dy] = moves[how];
-    moveContour(c, dx, dy);
+    groupOf(c).forEach((x) => moveContour(x, dx, dy));
     commit();
   }
 
@@ -3210,6 +3388,20 @@
   // ---------------------------------------------------------------------
   // Assembly view: every piece stacked flat, lined up by origin point, in
   // its own colour; holes that should share a stitch but don't are flagged.
+
+  // Pieces grouped in Assemble move together. A piece lined up on the
+  // origin of another piece in its group already follows that one, so it
+  // isn't moved twice.
+  function asmMovers(id) {
+    const g = asmEntry(id).group;
+    if (!g) return [id];
+    const ids = project.pieces.map((p) => p.id).filter((x) => asmEntry(x).group === g);
+    const items = AS.buildAssembly(project).items;
+    return ids.filter((x) => {
+      const it = items.find((i) => i.piece.id === x);
+      return !(it && it.pairedId && ids.includes(it.pairedId));
+    });
+  }
 
   function asmEntry(id, create = false) {
     project.assembly = project.assembly || { pieces: {} };
@@ -3349,8 +3541,32 @@
         <label class="fld"><span>Across</span>${numInput('id="asmDx"', Number(e.dx) || 0)}</label>
         <label class="fld"><span>Up</span>${numInput('id="asmDy"', Number(e.dy) || 0)}</label></div>
         <button class="small" id="asmReset" style="margin-top:8px">Line up by origin again</button></div>
+      ${asmOrderCard(it)}
+      ${asmGroupCard(it, e)}
       ${checkCard}
       <div class="row"><button class="small" id="asmEdit">${icon('pen')} Edit this piece</button>${dl}</div>`;
+  }
+
+  const it2 = (id) => project.pieces.find((p) => p.id === id);
+
+  function asmOrderCard(it) {
+    const i = project.pieces.indexOf(it.piece);
+    const n = project.pieces.length;
+    if (n < 2) return '';
+    const b = (k, label, off) => `<button data-asm-order="${k}" ${off ? 'disabled' : ''}>${label}</button>`;
+    return `<div class="card"><h4>${icon('piece')} Stack order</h4>
+      <div class="align-grid four">${b('back', 'To bottom', i === 0)}${b('down', 'Down', i === 0)}${b('up', 'Up', i === n - 1)}${b('front', 'To top', i === n - 1)}</div>
+      <p class="note">${i + 1} of ${n}, counting from the bottom. Pieces higher up are drawn on top.</p></div>`;
+  }
+
+  function asmGroupCard(it, e) {
+    const others = project.pieces.filter((p) => p !== it.piece && p.outline.segments.length);
+    if (!others.length) return '';
+    const g = e.group;
+    const btn = (p) => `<button class="${g && asmEntry(p.id).group === g ? 'on' : ''}" data-asm-group="${p.id}">${esc(p.name)}</button>`;
+    return `<div class="card"><h4>${icon('copy')} Moves together with</h4>
+      <div class="align-grid two">${others.map(btn).join('')}</div>
+      <p class="note">Pick pieces to group with this one; dragging or shifting any of them moves the whole group.</p></div>`;
   }
 
   function downloadAssembly() {
@@ -3395,6 +3611,30 @@
     } else if (t.id === 'asmFlip') {
       en.flip = !en.flip;
       commit();
+    } else if (t.dataset.asmOrder) {
+      const cur = piece();
+      if (moveOrder(project.pieces, it2(id), t.dataset.asmOrder)) {
+        ui.pieceIdx = Math.max(0, project.pieces.indexOf(cur));
+        commit();
+      }
+    } else if (t.dataset.asmGroup) {
+      const other = asmEntry(t.dataset.asmGroup, true);
+      const g = en.group;
+      if (g && other.group === g) {
+        delete other.group;
+        // A group of one is no group.
+        const left = project.pieces.filter((p) => asmEntry(p.id).group === g);
+        if (left.length === 1) delete asmEntry(left[0].id, true).group;
+      } else {
+        const gid = g || M.uid();
+        en.group = gid;
+        // Joining brings the other piece's whole group along.
+        const og = other.group;
+        project.pieces.forEach((p) => {
+          if (p.id === t.dataset.asmGroup || (og && asmEntry(p.id).group === og)) asmEntry(p.id, true).group = gid;
+        });
+      }
+      commit();
     } else if (t.id === 'asmReset') {
       en.dx = 0;
       en.dy = 0;
@@ -3416,7 +3656,12 @@
       bad(t);
       return;
     }
-    asmEntry(ui.asmSel, true)[t.id === 'asmDx' ? 'dx' : 'dy'] = v;
+    const key = t.id === 'asmDx' ? 'dx' : 'dy';
+    const delta = v - (Number(asmEntry(ui.asmSel)[key]) || 0);
+    asmMovers(ui.asmSel).forEach((id) => {
+      const en = asmEntry(id, true);
+      en[key] = round((Number(en[key]) || 0) + delta);
+    });
     commit();
   });
 
@@ -3736,6 +3981,10 @@
     else if (k === 'o') setTool('origin');
     else if (k === 'k') setTool('path');
     else if (k === 'e') setTool('erase');
+    else if ((k === '[' || k === ']') && ui.sel.type === 'shape' && selected('shape').length === 1) {
+      const sh = shapeById(selected('shape')[0]);
+      if (sh && moveOrder(piece().cutouts, sh, k === ']' ? 'up' : 'down')) commit();
+    }
     else if ((k === 'delete' || k === 'backspace') && ['shape', 'notch', 'line', 'path'].includes(ui.sel.type)) deleteSelected();
     else if (ui.sel.type === 'path' && (k === 'h' || k === 's')) {
       selected('path').forEach((id) => {
