@@ -37,8 +37,14 @@
   // Notch outline relative to the edge: { segs: [{type,...}] } as turtle
   // segments starting at the notch's first mouth corner, heading h (deg),
   // with `s` = +1 when the material is to the left of the edge.
-  function notchSegments(h, width, depth, s, shape) {
+  function notchSegments(h, width, depth, s, shape, diameter) {
     const w2 = width / 2;
+    if (shape === 'circle') {
+      // Part of a circle of the given diameter, sunk `depth` into the edge.
+      const R = diameter / 2;
+      const phi = G.deg(Math.acos(Math.max(-1, Math.min(1, (R - depth) / R))));
+      return [{ type: 'arc', radius: R, sweep: -s * 2 * phi, angle: h + s * phi }];
+    }
     if (shape === 'square') {
       return [
         { type: 'line', length: depth, angle: h + s * 90 },
@@ -81,9 +87,19 @@
     });
   }
 
+  // How wide a notch is where it meets the edge. A circle notch is set by
+  // its diameter and how deep it goes; its mouth follows from those.
+  function notchWidth(n) {
+    if (n.shape !== 'circle') return Number(n.width) || 0;
+    const D = Number(n.diameter) || 0;
+    const d = Number(n.depth) || 0;
+    if (!(D > 0) || !(d > 0) || d >= D) return 0;
+    return 2 * Math.sqrt(d * (D - d));
+  }
+
   // Where a notch sits on its edge: { at, ok } (at = centre, mm from start).
   function notchPlace(notch, L) {
-    const w = Number(notch.width) || 0;
+    const w = notchWidth(notch);
     const d = Number(notch.depth) || 0;
     if (!(w > 0) || !(d > 0) || w > L - 1e-6) return { ok: false, at: L / 2 };
     let at = notch.at === null || notch.at === undefined ? L / 2 : Number(notch.at);
@@ -110,7 +126,7 @@
       let pos = 0;
       let startV = { vref: e.vref, fillet: e.fillet, corner: e.corner };
       placed.forEach(({ n, ok, at: c }) => {
-        const w2 = (Number(n.width) || 0) / 2;
+        const w2 = notchWidth(n) / 2;
         if (!ok || c - w2 < pos - 1e-6) {
           report[n.id] = { ok: false, reason: ok ? 'overlap' : 'size', edgeLength: L };
           return;
@@ -128,7 +144,8 @@
           startV = vL;
         }
         const square = n.shape === 'square';
-        const prims = segsToPrims(P0, notchSegments(h, Number(n.width), Number(n.depth), s, n.shape));
+        const sn = n.out ? -s : s; // `out`: the notch sticks out instead of in
+        const prims = segsToPrims(P0, notchSegments(h, notchWidth(n), Number(n.depth), sn, n.shape, Number(n.diameter)));
         prims.forEach((p, k) => {
           // A square notch has two real corners at the bottom; a round
           // notch's inner joins are smooth.
@@ -377,7 +394,14 @@
     const lines = piece.lines || [];
     const linesOn = (target) => lines.filter((l) => (l.target || 'outline') === target);
     // A shape's own edges, after any lines drawn across it.
-    const shapeEdges = (c) => applyLines(taggedEdges(c, `c:${c.id}:`), linesOn(c.id), report.lines);
+    // Notches sit on the outline, or on a shape's edge (`notch.on`).
+    const notchesOn = (id) => (piece.notches || []).filter((n) => (n.on || 'outline') === id);
+    const shapeEdges = (c) => {
+      let e = taggedEdges(c, `c:${c.id}:`);
+      const ns = notchesOn(c.id);
+      if (e.length && ns.length) e = applyNotches(e, ns, G.signedArea(e) > 0, report.notches);
+      return applyLines(e, linesOn(c.id), report.lines);
+    };
     let edges = taggedEdges(base, 'o:');
     if (!edges.length) {
       (piece.cutouts || []).forEach((c) => {
@@ -389,7 +413,7 @@
       return out;
     }
     const ccw = G.signedArea(edges) > 0;
-    edges = applyNotches(edges, piece.notches, ccw, report.notches);
+    edges = applyNotches(edges, notchesOn('outline'), ccw, report.notches);
 
     let outer = edges;
     const derived = [];
@@ -612,5 +636,5 @@
     });
   }
 
-  LT.resolve = { applyStick, SIDES, resolvePiece, lineChord, ccwTagged, primsToContour, notchSegments, notchPlace, OPS, isCircle, rawBox, resizeContour, resizePiece, resizeShape, shiftEdge };
+  LT.resolve = { applyStick, SIDES, resolvePiece, lineChord, ccwTagged, primsToContour, notchSegments, notchPlace, notchWidth, OPS, isCircle, rawBox, resizeContour, resizePiece, resizeShape, shiftEdge };
 })(typeof window !== 'undefined' ? window : globalThis);

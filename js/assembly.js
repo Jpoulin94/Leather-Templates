@@ -85,6 +85,7 @@
       let anchor = anchorOf(lay);
       let target = { x: 0, y: 0 };
       let pairedWith = null;
+      let pairedId = null;
       for (let k = placed.length - 1; k >= 0 && !pairedWith; k--) {
         for (const o of own) {
           const hit = placed[k].origins.find((q) => same(q.name, o.name));
@@ -92,6 +93,7 @@
             anchor = { pt: o.pt, name: o.name, hasOrigin: true };
             target = hit.pt;
             pairedWith = placed[k].name;
+            pairedId = placed[k].id;
             break;
           }
         }
@@ -100,7 +102,7 @@
       const all = LT.layout.allOf(lay);
       const on = e.on !== false;
       const origins = own.map((o) => ({ name: o.name, pt: tf.point(o.pt) }));
-      if (on) placed.push({ name: pc.name, origins });
+      if (on) placed.push({ id: pc.id, name: pc.name, origins });
       items.push({
         piece: pc,
         index: i,
@@ -110,6 +112,7 @@
         hasOrigin: anchor.hasOrigin,
         originName: anchor.name,
         pairedWith,
+        pairedId,
         origin: tf.point(anchor.pt),
         origins,
         outline: lay.outline.prims.map(tf.prim),
