@@ -56,6 +56,7 @@ Click a straight outline edge and choose **Add a notch to this edge**. It starts
 - **Circle notches**: click a straight edge of the outline or of a shape and press "Add a notch to this edge". Choose Circle to set the circle's diameter and how deep it goes into the edge. Cuts in or Sticks out flips its direction.
 - **Order**: a selected shape has To back, Back, Forward and To front buttons (or the [ and ] keys). Shapes in front are drawn on top and cut after the ones behind. In Assemble, Stack order moves a piece up or down the stack.
 - **Groups**: Shift-click shapes and press Group these shapes; dragging or repositioning one moves them all. In Assemble, "Moves together with" groups pieces the same way.
+- **Drawing stitch paths**: legs go straight across or straight up (turn off "Right angles only", or hold Shift, for any angle) and are always a whole number of hole spaces long. Type a number in "Holes per leg" to make every leg exactly that many holes, counting the hole it starts from. A selected path shows each leg's hole count, which you can change.
 - **Origin points**: choose **Add an origin point** (or press O), then click a hole or a stitch line. A hole stays put there and the others space out exactly from it; on a stitch line a short tick marks the spot on the print. A piece can have as many as you need, on the outline, shapes or stitch paths. Each gets a letter (A, B, C…) that you can rename under **Stitching**, for example "Pocket". The names are printed next to them.
 
 ### Assemble

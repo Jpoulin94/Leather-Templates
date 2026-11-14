@@ -103,6 +103,8 @@
     stitchOpen: pref('stitchOpen', true),
     highlight: null, // uneven side (index + 1) to show on the drawing
     pathDraft: null, // points of a stitch path being drawn
+    pathSquare: true, // stitch paths drawn at right angles only
+    pathCount: null, // holes per leg while drawing (null: any length)
     unevenHover: null,
     clash: null, // flagged edge hovered in the Stitching section
   };
@@ -707,6 +709,8 @@
     const tol = 10 / ui.view.scale;
     const draft = ui.pathDraft || [];
     if (draft.length >= 3 && G.dist(pt, draft[0]) <= tol) return { ...draft[0], closes: true };
+    const last = draft[draft.length - 1];
+    if (last && (ui.pathSquare || ui.pathCount) && !ui.shift) return squarePathPoint(pt, last, tol);
     let best = null;
     const near = (q, kind) => {
       const d = G.dist(q, pt);
@@ -717,7 +721,6 @@
     (piece().paths || []).forEach((p) => p.points.forEach((q) => near(q, 'point')));
     draft.forEach((q) => near(q, 'point'));
     if (best) return { ...best.pt, snapped: best.kind };
-    const last = draft[draft.length - 1];
     if (last && ui.shift) {
       const d = G.sub(pt, last);
       const a = Math.round(Math.atan2(d.y, d.x) / G.rad(15)) * G.rad(15);
@@ -730,6 +733,44 @@
       return { x: Math.round(pt.x / st) * st, y: Math.round(pt.y / st) * st };
     }
     return pt;
+  }
+
+  // Drawing a stitch path at right angles: the leg runs straight across or
+  // straight up from the last point, a whole number of hole spaces long so
+  // every hole keeps the spacing, or exactly the number of holes asked for
+  // (the hole it starts from counts as the first). Near a hole, it lines up
+  // with that hole.
+  function squarePathPoint(pt, last, tol) {
+    const sp = project.defaults.spacing;
+    const d = G.sub(pt, last);
+    let dir = ui.pathSquare
+      ? Math.abs(d.x) >= Math.abs(d.y) ? { x: Math.sign(d.x) || 1, y: 0 } : { x: 0, y: Math.sign(d.y) || 1 }
+      : G.len(d) > 1e-9 ? G.norm(d) : { x: 1, y: 0 };
+    let L = d.x * dir.x + d.y * dir.y;
+    if (L < 0) {
+      dir = G.mul(dir, -1);
+      L = -L;
+    }
+    let snapped = null;
+    if (ui.pathCount) {
+      L = (ui.pathCount - 1) * sp;
+    } else {
+      // Level with a hole near the pointer, if one is in reach.
+      let best = null;
+      Lay.allOf(curLay()).forEach((lc) => lc.holes.forEach((h) => {
+        const along = (h.x - last.x) * dir.x + (h.y - last.y) * dir.y;
+        const q = G.add(last, G.mul(dir, along));
+        const dd = G.dist(q, pt);
+        if (along > 1e-6 && G.dist(h, pt) <= tol * 2 && (!best || dd < best.d)) best = { d: dd, along };
+      }));
+      if (best) {
+        L = best.along;
+        snapped = 'hole';
+      }
+      if (sp > 0) L = Math.max(1, Math.round(L / sp)) * sp;
+    }
+    const q = G.add(last, G.mul(dir, L));
+    return { x: q.x, y: q.y, snapped, holes: sp > 0 ? Math.round(L / sp) + 1 : null };
   }
 
   function addPathPoint(world) {
@@ -1374,7 +1415,7 @@
         const last = pts[pts.length - 1];
         if (last) {
           const d = G.sub(m, last);
-          const lbl = `${fmt(G.len(d))} ${units()} · ${num(Math.round(((G.deg(Math.atan2(d.y, d.x)) % 360) + 360) % 360 * 10) / 10)}°`;
+          const lbl = `${m.holes ? `${m.holes} holes · ` : ''}${fmt(G.len(d))} ${units()} · ${num(Math.round(((G.deg(Math.atan2(d.y, d.x)) % 360) + 360) % 360 * 10) / 10)}°`;
           out.push(`<g transform="translate(${num(m.x + px(12))} ${num(-m.y - px(12))})" pointer-events="none"><rect x="0" y="${num(-px(15))}" width="${num(px(lbl.length * 6.6 + 12))}" height="${num(px(20))}" rx="${num(px(5))}" fill="var(--ink)"/><text x="${num(px(6))}" y="${num(-px(1))}" font-size="${num(px(12))}" fill="var(--bg)">${esc(lbl)}</text></g>`);
         }
       }
@@ -2720,7 +2761,10 @@
   function renderPathToolInspector() {
     const n = (ui.pathDraft || []).length;
     return `${head('stitchpath', 'Stitch path', n ? `${n} point${n === 1 ? '' : 's'} so far` : 'Click the first point')}
-      <div class="tip">${icon('info')}<div>Click to place points; each click carries the line on from the last one. Points snap to holes, corners and the grid, and Shift gives 15° steps. Click the first point to close it into a loop. It never cuts the leather: it only carries holes or a stitch line.</div></div>
+      <div class="tip">${icon('info')}<div>Click a hole to start, then click to carry the line on. Each leg is a whole number of hole spaces, so the spacing stays exact. Click the first point to close it into a loop. It never cuts the leather: it only carries holes or a stitch line.</div></div>
+      <div class="card"><label class="switch"><span>Right angles only</span><input type="checkbox" id="pathSquare" ${ui.pathSquare ? 'checked' : ''}></label>
+        <label class="fld" style="margin-top:8px"><span>Holes per leg (counting the one it starts from)</span><input type="text" inputmode="numeric" id="pathCount" value="${ui.pathCount || ''}" placeholder="Any"></label>
+        <p class="note">${ui.pathCount ? `Each leg is ${ui.pathCount} holes: ${ui.pathCount - 1} more after the one it starts from. Point the way you want it to go and click.` : 'Leave it empty to set the length with the mouse; it still snaps to whole hole spaces.'} Hold Shift to draw at any angle.</p></div>
       <div class="row"><button class="primary" id="finishPath" ${n > 1 ? '' : 'disabled'}>${icon('check')} Finished</button><button id="undoPathPoint" ${n ? '' : 'disabled'}>Remove last point</button></div>
       <button class="ghost" data-tool-start="select" style="margin-top:8px">Cancel</button>`;
   }
@@ -2732,6 +2776,7 @@
     for (let k = 0; k + 1 < n; k++) legs.push(G.dist(pth.points[k], pth.points[k + 1]));
     if (pth.closed) legs.push(G.dist(pth.points[n - 1], pth.points[0]));
     const total = legs.reduce((a, b) => a + b, 0);
+    const sp = project.defaults.spacing;
     const lc = curLay().paths.find((x) => x.src === pth.id);
     const holes = lc ? lc.holes.length : 0;
     return `${head('stitchpath', `Stitch path ${pathNo(pth.id)}`, `${fmt(total)} ${units()} long${pth.mode === 'holes' ? ` · ${holes} holes` : ''}`)}
@@ -2740,9 +2785,13 @@
         .join('')}</div>
         <p class="note">Holes sit right on the line. Each bend gets a hole; click a bend’s dot to switch it off, or round it with Round corners.</p></div>
       <div class="card"><h4>Legs</h4><div class="grid2">${legs
-        .map((L, k) => `<label class="fld"><span>Leg ${k + 1}</span>${numInput(`data-pathleg="${k}"`, L)}</label>`)
+        .map((L, k) => {
+          const holesIn = sp > 0 && Math.abs(L / sp - Math.round(L / sp)) < 1e-3 ? String(Math.round(L / sp) + 1) : '';
+          return `<label class="fld"><span>Leg ${k + 1} length</span>${numInput(`data-pathleg="${k}"`, L)}</label>
+            <label class="fld"><span>Leg ${k + 1} holes</span><input type="text" inputmode="numeric" data-pathcount="${k}" value="${holesIn}" placeholder="—"></label>`;
+        })
         .join('')}</div>
-        <p class="note">Changing a leg moves the points after it.</p></div>
+        <p class="note">Holes counts both ends of the leg, so 4 holes is 3 spaces. Changing a leg moves the points after it.</p></div>
       <div class="card"><h4>Start point</h4><div class="grid2">
         <label class="fld"><span>X</span>${numInput('data-pathstart="x"', pth.points[0].x)}</label>
         <label class="fld"><span>Y</span>${numInput('data-pathstart="y"', pth.points[0].y)}</label></div>
@@ -2871,6 +2920,23 @@
     }
     if (t.id === 'pieceName') {
       pc.name = t.value.trim() || pc.name;
+      return commit();
+    }
+    if (t.id === 'pathSquare') {
+      ui.pathSquare = t.checked;
+      return renderAll();
+    }
+    if (t.id === 'pathCount') {
+      const v = Math.round(Number(t.value));
+      ui.pathCount = t.value.trim() && Number.isFinite(v) && v >= 2 ? v : null;
+      if (t.value.trim() && !ui.pathCount) toast('Use 2 or more holes, or leave it empty.');
+      return renderAll();
+    }
+    if (t.dataset.pathcount !== undefined) {
+      const pth = pathById(selected('path')[0]);
+      const v = Math.round(Number(t.value));
+      if (!pth || !Number.isFinite(v) || v < 2) return bad(t);
+      setPathLeg(pth, Number(t.dataset.pathcount), (v - 1) * project.defaults.spacing);
       return commit();
     }
     if (t.dataset.pathleg !== undefined || t.dataset.pathstart || t.id === 'pathClosed') {
