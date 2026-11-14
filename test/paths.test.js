@@ -208,3 +208,29 @@ test('a hole taken out of a stitch path follows the path when it moves', () => {
   assert.ok(!hasPoint(lc.holes, 30, 32));
   assert.equal(lc.skipped.length, 1);
 });
+
+test('a shape locked to the top of the outline stays there through resizes', () => {
+  const pr = project();
+  const pc = pr.pieces[0]; // 100 x 60
+  const sh = model.newShape(model.rectangle(40, 30, 0, 30, 10, 'none'));
+  pc.cutouts.push(sh);
+  const R = LT.resolve;
+  sh.stick = ['top'];
+  R.applyStick(pc);
+  const top = () => R.rawBox(pc.outline).maxY;
+  assert.ok(near(R.rawBox(sh).maxY, top()));
+  // The shape gets taller: only downwards.
+  R.resizeShape(sh, NaN, 45, pc.lines);
+  R.applyStick(pc);
+  assert.ok(near(R.rawBox(sh).maxY, top()));
+  assert.ok(near(R.rawBox(sh).maxY - R.rawBox(sh).minY, 45));
+  // The piece gets taller: the shape stays on the top edge.
+  R.resizePiece(pc, NaN, 90);
+  assert.ok(near(R.rawBox(sh).maxY, top()));
+  assert.ok(near(R.rawBox(sh).maxY - R.rawBox(sh).minY, 45));
+  // Top and bottom: it spans the outline.
+  sh.stick = ['top', 'bottom'];
+  R.applyStick(pc);
+  const b = R.rawBox(sh), o = R.rawBox(pc.outline);
+  assert.ok(near(b.maxY, o.maxY) && near(b.minY, o.minY));
+});

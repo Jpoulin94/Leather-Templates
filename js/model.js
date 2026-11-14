@@ -188,7 +188,12 @@
         id: pc.id || uid(),
         outline,
         notches: (pc.notches || []).map((n) => ({ ...newNotch(0, 20, 10), ...n, corners: { L: { fillet: 0, corner: true }, R: { fillet: 0, corner: true }, ...(n.corners || {}) } })),
-        cutouts: (pc.cutouts || []).map((c) => fixOrigins({ id: uid(), op: 'hole', joins: {}, ...fixContour(c) })),
+        cutouts: (pc.cutouts || []).map((c) => {
+          const sh = fixOrigins({ id: uid(), op: 'hole', joins: {}, ...fixContour(c) });
+          if (Array.isArray(sh.stick)) sh.stick = sh.stick.filter((k) => ['top', 'bottom', 'left', 'right'].includes(k));
+          else delete sh.stick;
+          return sh;
+        }),
         lines: (pc.lines || []).filter((l) => l && l.a && l.b).map((l) => ({ ...newLine(l.a, l.b), ...l, corners: { a: { fillet: 0, corner: true }, b: { fillet: 0, corner: true }, ...(l.corners || {}) } })),
         paths: (pc.paths || []).filter((p) => p && Array.isArray(p.points) && p.points.length > 1).map((p) => fixOrigins({ ...newPath(p.points), ...p, corners: { ...(p.corners || {}) } })),
         removedHoles: (pc.removedHoles || []).filter((r) => r && typeof r.on === 'string' && Number.isFinite(r.x) && Number.isFinite(r.y)),
