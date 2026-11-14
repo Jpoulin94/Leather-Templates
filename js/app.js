@@ -1680,6 +1680,22 @@
     return m.a ? 'Click the second point · it snaps to holes, corners and edges' : 'Measure: click the first point · it snaps to holes, corners and edges · M or Esc to stop';
   }
 
+  // The front-most shape that cuts or merges with the outline under pt.
+  function shapeAt(pt) {
+    const live = piece().cutouts.filter(isLiveOp);
+    for (let i = live.length - 1; i >= 0; i--) {
+      const poly = G.samplePoints(G.buildPrimitives(live[i]), 48);
+      let inside = false;
+      for (let a = 0, b = poly.length - 1; a < poly.length; b = a++) {
+        const p = poly[a];
+        const q = poly[b];
+        if (p.y > pt.y !== q.y > pt.y && pt.x < ((q.x - p.x) * (pt.y - p.y)) / (q.y - p.y) + p.x) inside = !inside;
+      }
+      if (inside) return live[i];
+    }
+    return null;
+  }
+
   function handleCanvasClick(target, world, shiftKey) {
     if (ui.measure) {
       measureClick(world);
@@ -1738,8 +1754,16 @@
     // Shift-click shapes, or inside the piece for the outline, to pick
     // several things to line up.
     const fill = !el && target && target.dataset && target.dataset.fill;
-    if ((el && el.dataset.shape) || (fill && shiftKey)) {
-      const id = el ? el.dataset.shape : 'outline';
+    // While picking several shapes, Shift-clicking a shape's edge, or inside
+    // a shape that cuts or merges with the outline, picks that shape.
+    let picked = el && el.dataset.shape;
+    if (shiftKey && !picked && (ui.sel.type === 'shape' || ui.sel.type === null)) {
+      const r = el && el.dataset.ref ? parseRef(el.dataset.ref) : null;
+      if (r && r.kind === 'c' && shapeById(r.id)) picked = r.id;
+      else if (fill) picked = (shapeAt(world) || {}).id;
+    }
+    if (picked || (fill && shiftKey)) {
+      const id = picked || 'outline';
       if (shiftKey && (ui.sel.type === 'shape' || ui.sel.type === null)) {
         const items = ui.sel.type === 'shape' ? ui.sel.items.slice() : [];
         const k = items.indexOf(id);
